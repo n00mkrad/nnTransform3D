@@ -15,13 +15,14 @@ if %errorlevel% neq 0 (
     goto end
 )
 
-cmake --build "%~dp0build" --config Release
+cmake --build "%~dp0build" --config Release -j 8
 
 if %errorlevel% neq 0 (
     echo Finished with ERRORLEVEL %errorlevel%
 ) else (
-    echo Copying ONNX Runtime DLLs...
+    echo Copying ONNX Runtime DLLs and model weights...
     copy "%~dp0onnxruntime-win-x64-gpu\lib\*.dll" "%~dp0build\Release\"
+    copy "%~dp0chroma_net.onnx" "%~dp0build\Release\"
     echo Done.
 )
 
