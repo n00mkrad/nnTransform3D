@@ -444,17 +444,21 @@ void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int ac
     for (int y = 0; y < FRAME_HEIGHT; ++y) {
         for (int x = 0; x < FRAME_WIDTH; ++x) {
             int idx = y * FRAME_WIDTH + x;
+            // If on the left side of the active picture (including Sync and Color Burst) or right side (Front Porch)
             if (x < activeStartX || x >= activeEndX) {
+                // Copy original CVBS signal as is
                 lumaOut[idx] = frame.cvbs[idx];
                 chromaOut[idx] = frame.cvbs[idx];
             }
             else {
+                // Active image area: use the result separated by the neural network 3D
                 double chromaVal = 0.0;
                 if (frame.weightSum[idx] > 0.00001) {
                     chromaVal = frame.accChroma[idx] / frame.weightSum[idx];
                 }
 
                 double lumaVal = frame.cvbs[idx] - chromaVal;
+                // Clamp and add Chroma's 32768 neutral gray offset
                 lumaOut[idx] = std::min(std::max((int)std::round(lumaVal), 0), 65535);
                 chromaOut[idx] = std::min(std::max((int)std::round(chromaVal + 32768.0), 0), 65535);
             }
@@ -462,6 +466,7 @@ void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int ac
     }
 
     if (outputState.mode == OutputMode::Tbc) {
+        // Split the Frame back into two Fields for writing, to maintain TBC compatibility
         for (int field = 0; field < 2; ++field) {
             std::vector<uint16_t> fieldLuma(FIELD_WIDTH * FIELD_HEIGHT);
             std::vector<uint16_t> fieldChroma(FIELD_WIDTH * FIELD_HEIGHT);
@@ -716,6 +721,7 @@ int main(int argc, char** argv) {
         std::cerr << "[Error] Failed at initial frame read. Exiting.\n";
         return 0;
     }
+    // Send the newly read first frame into GPU
     cudaMemcpy(frame1.d_cvbs, frame1.cvbs.data(), FRAME_WIDTH * FRAME_HEIGHT * sizeof(uint16_t), cudaMemcpyHostToDevice);
 
     log << "First frame read successfully. Executing first 3D split...\n";
@@ -729,10 +735,13 @@ int main(int argc, char** argv) {
     int frameCount = 1;
     while (readInterlacedFrame(is, frame1)) {
         try {
+            // Immediately send to GPU upon reading each frame
             cudaMemcpy(frame1.d_cvbs, frame1.cvbs.data(), FRAME_WIDTH * FRAME_HEIGHT * sizeof(uint16_t), cudaMemcpyHostToDevice);
             processSplit3D(frame0, frame1, *session, activeVideoStart, activeVideoEnd);
+            // After processing, fetch back the overlap-added Chroma and Weight from GPU to CPU
             cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
             cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
+            // Write back to disk or raw stream
             finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
         }
         catch (const std::exception& e) {
@@ -755,6 +764,7 @@ int main(int argc, char** argv) {
     frame1.isPadding = true;
     processSplit3D(frame0, frame1, *session, activeVideoStart, activeVideoEnd);
 
+    // Bring the final frame results back to CPU
     cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
     finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
