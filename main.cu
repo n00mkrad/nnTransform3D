@@ -1,4 +1,4 @@
-﻿#include <iostream>
+#include <iostream>
 #include <fstream>
 #include <vector>
 #include <string>
@@ -413,17 +413,12 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
 // --- Finalization and writing ---
 enum class OutputMode {
     Tbc,
-    Raw
-};
-
-enum class RawContentMode {
-    Y,
-    Yc
+    RawY,
+    RawYc
 };
 
 struct OutputState {
     OutputMode mode = OutputMode::Tbc;
-    RawContentMode rawContent = RawContentMode::Yc;
     std::ofstream osLuma;
     std::ofstream osChroma;
     std::ofstream osRaw;
@@ -431,8 +426,8 @@ struct OutputState {
 };
 
 void printUsage(const char* exeName) {
-    std::cerr << "Usage: " << exeName << " input.tbc [activeVideoStart] [activeVideoEnd] [--out-mode tbc|raw] [--raw-content y|yc] [--out <path|->]\n";
-    std::cerr << "Defaults: --out-mode tbc, --raw-content yc\n";
+    std::cerr << "Usage: " << exeName << " [--input <path>] [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc] [--out <path|->] [input.tbc]\n";
+    std::cerr << "Defaults: --out-mode tbc, --av-start 132, --av-end 896\n";
 }
 
 void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int activeStartX, int activeEndX) {
@@ -489,7 +484,7 @@ void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int ac
     }
 
     outputState.rawStream->write(reinterpret_cast<const char*>(lumaOut.data()), static_cast<std::streamsize>(lumaOut.size() * sizeof(uint16_t)));
-    if (outputState.rawContent == RawContentMode::Yc) {
+    if (outputState.mode == OutputMode::RawYc) {
         outputState.rawStream->write(reinterpret_cast<const char*>(chromaOut.data()), static_cast<std::streamsize>(chromaOut.size() * sizeof(uint16_t)));
     }
     if (!(*outputState.rawStream)) {
@@ -503,40 +498,56 @@ int main(int argc, char** argv) {
     int activeVideoEnd = 896;
     std::string inFile = "input.tbc"; // Default processing if no parameters are passed
     OutputMode outputMode = OutputMode::Tbc;
-    RawContentMode rawContent = RawContentMode::Yc;
     std::string rawOutPath;
-    bool rawContentSpecified = false;
     bool rawOutputPathSpecified = false;
+    bool inputSpecified = false;
 
     std::vector<std::string> positionalArgs;
     int argIndex = 1;
-    while (argIndex < argc && std::string(argv[argIndex]).rfind("--", 0) != 0) {
-        positionalArgs.push_back(argv[argIndex]);
-        argIndex++;
-    }
-
-    if (positionalArgs.size() > 3) {
-        std::cerr << "[Error] Too many positional arguments.\n";
-        printUsage(argv[0]);
-        return -1;
-    }
-
-    try {
-        if (positionalArgs.size() >= 1) inFile = positionalArgs[0];
-        if (positionalArgs.size() >= 2) activeVideoStart = std::stoi(positionalArgs[1]);
-        if (positionalArgs.size() >= 3) activeVideoEnd = std::stoi(positionalArgs[2]);
-    }
-    catch (const std::exception& e) {
-        std::cerr << "[Error] Invalid positional argument: " << e.what() << "\n";
-        printUsage(argv[0]);
-        return -1;
-    }
-
     while (argIndex < argc) {
         std::string arg = argv[argIndex];
         auto nextValueAvailable = [&]() { return (argIndex + 1 < argc) && (std::string(argv[argIndex + 1]).rfind("--", 0) != 0); };
 
-        if (arg == "--out-mode") {
+        if (arg == "--input") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --input.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            inFile = argv[++argIndex];
+            inputSpecified = true;
+        }
+        else if (arg == "--av-start") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --av-start.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                activeVideoStart = std::stoi(argv[++argIndex]);
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --av-start value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--av-end") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --av-end.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                activeVideoEnd = std::stoi(argv[++argIndex]);
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --av-end value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--out-mode") {
             if (!nextValueAvailable()) {
                 std::cerr << "[Error] Missing value after --out-mode.\n";
                 printUsage(argv[0]);
@@ -544,25 +555,10 @@ int main(int argc, char** argv) {
             }
             std::string value = argv[++argIndex];
             if (value == "tbc") outputMode = OutputMode::Tbc;
-            else if (value == "raw") outputMode = OutputMode::Raw;
+            else if (value == "raw_y") outputMode = OutputMode::RawY;
+            else if (value == "raw_yc") outputMode = OutputMode::RawYc;
             else {
                 std::cerr << "[Error] Unknown --out-mode value: " << value << "\n";
-                printUsage(argv[0]);
-                return -1;
-            }
-        }
-        else if (arg == "--raw-content") {
-            if (!nextValueAvailable()) {
-                std::cerr << "[Error] Missing value after --raw-content.\n";
-                printUsage(argv[0]);
-                return -1;
-            }
-            rawContentSpecified = true;
-            std::string value = argv[++argIndex];
-            if (value == "y") rawContent = RawContentMode::Y;
-            else if (value == "yc") rawContent = RawContentMode::Yc;
-            else {
-                std::cerr << "[Error] Unknown --raw-content value: " << value << "\n";
                 printUsage(argv[0]);
                 return -1;
             }
@@ -582,21 +578,25 @@ int main(int argc, char** argv) {
             return -1;
         }
         else {
-            std::cerr << "[Error] Positional arguments must be placed before named flags. Unexpected token: " << arg << "\n";
-            printUsage(argv[0]);
-            return -1;
+            positionalArgs.push_back(arg);
         }
         argIndex++;
     }
 
-    if (outputMode == OutputMode::Tbc && rawContentSpecified) {
-        std::cerr << "[Error] --raw-content is only valid when --out-mode raw is selected.\n";
+    if (!inputSpecified && !positionalArgs.empty()) {
+        inFile = positionalArgs[0];
+    }
+
+    size_t allowedPositionalCount = inputSpecified ? 0 : 1;
+    if (positionalArgs.size() > allowedPositionalCount) {
+        std::cerr << "[Error] Unexpected positional arguments. Only one positional input is allowed when --input is omitted.\n";
         printUsage(argv[0]);
         return -1;
     }
+
     if (outputMode == OutputMode::Tbc && rawOutputPathSpecified) {
         if (rawOutPath == "-") std::cerr << "[Error] --out - is not allowed in TBC mode because TBC writes two separate files.\n";
-        else std::cerr << "[Error] --out is only valid when --out-mode raw is selected.\n";
+        else std::cerr << "[Error] --out is only valid when --out-mode is raw_y or raw_yc.\n";
         printUsage(argv[0]);
         return -1;
     }
@@ -604,9 +604,9 @@ int main(int argc, char** argv) {
     std::string baseName = inFile.substr(0, inFile.find_last_of('.'));
     std::string lumaFile = baseName + "_Y.tbc";
     std::string chromaFile = baseName + "_C.tbc";
-    if (outputMode == OutputMode::Raw && !rawOutputPathSpecified) rawOutPath = (rawContent == RawContentMode::Y) ? (baseName + "_Y.raw") : (baseName + "_YC.raw");
+    if (outputMode != OutputMode::Tbc && !rawOutputPathSpecified) rawOutPath = (outputMode == OutputMode::RawY) ? (baseName + "_Y.raw") : (baseName + "_YC.raw");
 
-    bool writeRawToStdout = (outputMode == OutputMode::Raw && rawOutPath == "-");
+    bool writeRawToStdout = (outputMode != OutputMode::Tbc && rawOutPath == "-");
     std::ostream& log = std::cerr;
 
 #ifdef _WIN32
@@ -622,7 +622,7 @@ int main(int argc, char** argv) {
         log << "Luma Output: " << lumaFile << "\n";
         log << "Chroma Output: " << chromaFile << "\n";
     } else {
-        log << "Output Mode: RAW (" << ((rawContent == RawContentMode::Y) ? "Y" : "YC") << ")\n";
+        log << "Output Mode: " << ((outputMode == OutputMode::RawY) ? "RAW_Y" : "RAW_YC") << "\n";
         log << "Raw Output: " << (writeRawToStdout ? "stdout (-)" : rawOutPath) << "\n";
     }
 
@@ -647,7 +647,6 @@ int main(int argc, char** argv) {
 
     OutputState outputState;
     outputState.mode = outputMode;
-    outputState.rawContent = rawContent;
     if (outputMode == OutputMode::Tbc) {
         outputState.osLuma.open(lumaFile, std::ios::binary);
         outputState.osChroma.open(chromaFile, std::ios::binary);
