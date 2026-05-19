@@ -4,8 +4,12 @@
 #include <string>
 #include <cmath>
 #include <algorithm>
-#include <stdexcept>
 #include <memory>
+
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#endif
 
 
 #include <cufft.h>
@@ -406,9 +410,33 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
     cudaDeviceSynchronize();
 } 
 
-// --- Finalization and writing ---   (--- 结算与写入 ---)
-void finalizeAndWriteOutput(FrameBuffer& frame, std::ofstream& osLuma, std::ofstream& osChroma, int activeStartX, int activeEndX) {
-    if (frame.isPadding) return; // Absolute defense   (绝对防御)
+// --- Finalization and writing ---
+enum class OutputMode {
+    Tbc,
+    Raw
+};
+
+enum class RawContentMode {
+    Y,
+    Yc
+};
+
+struct OutputState {
+    OutputMode mode = OutputMode::Tbc;
+    RawContentMode rawContent = RawContentMode::Yc;
+    std::ofstream osLuma;
+    std::ofstream osChroma;
+    std::ofstream osRaw;
+    std::ostream* rawStream = nullptr;
+};
+
+void printUsage(const char* exeName) {
+    std::cerr << "Usage: " << exeName << " input.tbc [activeVideoStart] [activeVideoEnd] [--out-mode tbc|raw] [--raw-content y|yc] [--out <path|->]\n";
+    std::cerr << "Defaults: --out-mode tbc, --raw-content yc\n";
+}
+
+void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int activeStartX, int activeEndX) {
+    if (frame.isPadding) return; // Absolute defense
 
     std::vector<uint16_t> lumaOut(FRAME_WIDTH * FRAME_HEIGHT);
     std::vector<uint16_t> chromaOut(FRAME_WIDTH * FRAME_HEIGHT);
@@ -416,61 +444,182 @@ void finalizeAndWriteOutput(FrameBuffer& frame, std::ofstream& osLuma, std::ofst
     for (int y = 0; y < FRAME_HEIGHT; ++y) {
         for (int x = 0; x < FRAME_WIDTH; ++x) {
             int idx = y * FRAME_WIDTH + x;
-
-            // If on the left side of the active picture (including Sync and Color Burst) or right side (Front Porch)   (如果处于有效画面左侧（包含 Sync 和 Color Burst）或右侧（Front Porch）)
             if (x < activeStartX || x >= activeEndX) {
-                // Copy original CVBS signal as is   (原样复制原始的 CVBS 信号)
                 lumaOut[idx] = frame.cvbs[idx];
                 chromaOut[idx] = frame.cvbs[idx];
             }
             else {
-                // Active image area: use the result separated by the neural network 3D   (有效图像区域：使用神经网络 3D 分离出的结果)
                 double chromaVal = 0.0;
                 if (frame.weightSum[idx] > 0.00001) {
                     chromaVal = frame.accChroma[idx] / frame.weightSum[idx];
                 }
 
                 double lumaVal = frame.cvbs[idx] - chromaVal;
-
-                // Clamp and add Chroma's 32768 neutral gray offset   (钳位并加上 Chroma 的 32768 中性灰偏移)
                 lumaOut[idx] = std::min(std::max((int)std::round(lumaVal), 0), 65535);
                 chromaOut[idx] = std::min(std::max((int)std::round(chromaVal + 32768.0), 0), 65535);
             }
         }
     }
 
-    // Split the Frame back into two Fields for writing, to maintain TBC compatibility   (将 Frame 拆回两个 Field 写入，保持 TBC 兼容性)
-    for (int field = 0; field < 2; ++field) {
-        std::vector<uint16_t> fieldLuma(FIELD_WIDTH * FIELD_HEIGHT);
-        std::vector<uint16_t> fieldChroma(FIELD_WIDTH * FIELD_HEIGHT);
+    if (outputState.mode == OutputMode::Tbc) {
+        for (int field = 0; field < 2; ++field) {
+            std::vector<uint16_t> fieldLuma(FIELD_WIDTH * FIELD_HEIGHT);
+            std::vector<uint16_t> fieldChroma(FIELD_WIDTH * FIELD_HEIGHT);
 
-        for (int y = 0; y < FIELD_HEIGHT; ++y) {
-            int frameY = y * 2 + field;
-            if (frameY < FRAME_HEIGHT) {
-                std::copy(&lumaOut[frameY * FRAME_WIDTH], &lumaOut[(frameY + 1) * FRAME_WIDTH], &fieldLuma[y * FIELD_WIDTH]);
-                std::copy(&chromaOut[frameY * FRAME_WIDTH], &chromaOut[(frameY + 1) * FRAME_WIDTH], &fieldChroma[y * FIELD_WIDTH]);
+            for (int y = 0; y < FIELD_HEIGHT; ++y) {
+                int frameY = y * 2 + field;
+                if (frameY < FRAME_HEIGHT) {
+                    std::copy(&lumaOut[frameY * FRAME_WIDTH], &lumaOut[(frameY + 1) * FRAME_WIDTH], &fieldLuma[y * FIELD_WIDTH]);
+                    std::copy(&chromaOut[frameY * FRAME_WIDTH], &chromaOut[(frameY + 1) * FRAME_WIDTH], &fieldChroma[y * FIELD_WIDTH]);
+                }
             }
+            outputState.osLuma.write(reinterpret_cast<char*>(fieldLuma.data()), fieldLuma.size() * sizeof(uint16_t));
+            outputState.osChroma.write(reinterpret_cast<char*>(fieldChroma.data()), fieldChroma.size() * sizeof(uint16_t));
         }
-        osLuma.write(reinterpret_cast<char*>(fieldLuma.data()), fieldLuma.size() * sizeof(uint16_t));
-        osChroma.write(reinterpret_cast<char*>(fieldChroma.data()), fieldChroma.size() * sizeof(uint16_t));
+        return;
+    }
+
+    if (!outputState.rawStream) {
+        throw std::runtime_error("Raw output stream is not initialized.");
+    }
+
+    outputState.rawStream->write(reinterpret_cast<const char*>(lumaOut.data()), static_cast<std::streamsize>(lumaOut.size() * sizeof(uint16_t)));
+    if (outputState.rawContent == RawContentMode::Yc) {
+        outputState.rawStream->write(reinterpret_cast<const char*>(chromaOut.data()), static_cast<std::streamsize>(chromaOut.size() * sizeof(uint16_t)));
+    }
+    if (!(*outputState.rawStream)) {
+        throw std::runtime_error("Failed while writing raw output stream.");
     }
 }
 
-// --- Main program ---   (--- 主程序 ---)
+// --- Main program ---
 int main(int argc, char** argv) {
     int activeVideoStart = 132;
     int activeVideoEnd = 896;
-    std::string inFile = "asdfqazsnbb.tbc"; // Default processing if no parameters are passed   (如果不传参，默认处理)
+    std::string inFile = "input.tbc"; // Default processing if no parameters are passed
+    OutputMode outputMode = OutputMode::Tbc;
+    RawContentMode rawContent = RawContentMode::Yc;
+    std::string rawOutPath;
+    bool rawContentSpecified = false;
+    bool rawOutputPathSpecified = false;
 
-    if (argc >= 2) inFile = argv[1];
-    if (argc >= 3) activeVideoStart = std::stoi(argv[2]);
-    if (argc >= 4) activeVideoEnd = std::stoi(argv[3]);
+    std::vector<std::string> positionalArgs;
+    int argIndex = 1;
+    while (argIndex < argc && std::string(argv[argIndex]).rfind("--", 0) != 0) {
+        positionalArgs.push_back(argv[argIndex]);
+        argIndex++;
+    }
 
-    std::cout << "Target Input File: " << inFile << "\n";
+    if (positionalArgs.size() > 3) {
+        std::cerr << "[Error] Too many positional arguments.\n";
+        printUsage(argv[0]);
+        return -1;
+    }
+
+    try {
+        if (positionalArgs.size() >= 1) inFile = positionalArgs[0];
+        if (positionalArgs.size() >= 2) activeVideoStart = std::stoi(positionalArgs[1]);
+        if (positionalArgs.size() >= 3) activeVideoEnd = std::stoi(positionalArgs[2]);
+    }
+    catch (const std::exception& e) {
+        std::cerr << "[Error] Invalid positional argument: " << e.what() << "\n";
+        printUsage(argv[0]);
+        return -1;
+    }
+
+    while (argIndex < argc) {
+        std::string arg = argv[argIndex];
+        auto nextValueAvailable = [&]() { return (argIndex + 1 < argc) && (std::string(argv[argIndex + 1]).rfind("--", 0) != 0); };
+
+        if (arg == "--out-mode") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --out-mode.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            std::string value = argv[++argIndex];
+            if (value == "tbc") outputMode = OutputMode::Tbc;
+            else if (value == "raw") outputMode = OutputMode::Raw;
+            else {
+                std::cerr << "[Error] Unknown --out-mode value: " << value << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--raw-content") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --raw-content.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            rawContentSpecified = true;
+            std::string value = argv[++argIndex];
+            if (value == "y") rawContent = RawContentMode::Y;
+            else if (value == "yc") rawContent = RawContentMode::Yc;
+            else {
+                std::cerr << "[Error] Unknown --raw-content value: " << value << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--out") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --out.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            rawOutputPathSpecified = true;
+            rawOutPath = argv[++argIndex];
+        }
+        else if (arg.rfind("--", 0) == 0) {
+            std::cerr << "[Error] Unknown option: " << arg << "\n";
+            printUsage(argv[0]);
+            return -1;
+        }
+        else {
+            std::cerr << "[Error] Positional arguments must be placed before named flags. Unexpected token: " << arg << "\n";
+            printUsage(argv[0]);
+            return -1;
+        }
+        argIndex++;
+    }
+
+    if (outputMode == OutputMode::Tbc && rawContentSpecified) {
+        std::cerr << "[Error] --raw-content is only valid when --out-mode raw is selected.\n";
+        printUsage(argv[0]);
+        return -1;
+    }
+    if (outputMode == OutputMode::Tbc && rawOutputPathSpecified) {
+        if (rawOutPath == "-") std::cerr << "[Error] --out - is not allowed in TBC mode because TBC writes two separate files.\n";
+        else std::cerr << "[Error] --out is only valid when --out-mode raw is selected.\n";
+        printUsage(argv[0]);
+        return -1;
+    }
 
     std::string baseName = inFile.substr(0, inFile.find_last_of('.'));
     std::string lumaFile = baseName + "_Y.tbc";
-    std::string chromaFile = baseName + "_Y_chroma.tbc";
+    std::string chromaFile = baseName + "_C.tbc";
+    if (outputMode == OutputMode::Raw && !rawOutputPathSpecified) rawOutPath = (rawContent == RawContentMode::Y) ? (baseName + "_Y.raw") : (baseName + "_YC.raw");
+
+    bool writeRawToStdout = (outputMode == OutputMode::Raw && rawOutPath == "-");
+    std::ostream& log = std::cerr;
+
+#ifdef _WIN32
+    if (writeRawToStdout && _setmode(_fileno(stdout), _O_BINARY) == -1) {
+        std::cerr << "[Error] Failed to switch stdout to binary mode for raw output.\n";
+        return -1;
+    }
+#endif
+
+    log << "Target Input File: " << inFile << "\n";
+    if (outputMode == OutputMode::Tbc) {
+        log << "Output Mode: TBC (dual files)\n";
+        log << "Luma Output: " << lumaFile << "\n";
+        log << "Chroma Output: " << chromaFile << "\n";
+    } else {
+        log << "Output Mode: RAW (" << ((rawContent == RawContentMode::Y) ? "Y" : "YC") << ")\n";
+        log << "Raw Output: " << (writeRawToStdout ? "stdout (-)" : rawOutPath) << "\n";
+    }
 
     std::ifstream is(inFile, std::ios::binary);
     if (!is.is_open()) {
@@ -478,64 +627,80 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    // Check file size   (检查文件大小)
+    // Check file size
     is.seekg(0, std::ios::end);
     long long fileSize = is.tellg();
-    is.seekg(0, std::ios::beg); // Reset cursor   (游标归位)
-    std::cout << "File opened successfully. Size: " << fileSize << " bytes.\n";
+    is.seekg(0, std::ios::beg); // Reset cursor
+    log << "File opened successfully. Size: " << fileSize << " bytes.\n";
 
-    // Calculate the number of bytes needed for one frame: 910 * 263 * 2 fields * 2 bytes (uint16)   (算一下一帧需要的字节数: 910 * 263 * 2场 * 2字节(uint16))
+    // Calculate the number of bytes needed for one frame: 910 * 263 * 2 fields * 2 bytes (uint16)
     long long frameBytes = FIELD_WIDTH * FIELD_HEIGHT * 2 * 2;
-    std::cout << "Bytes required for ONE frame: " << frameBytes << " bytes.\n";
+    log << "Bytes required for ONE frame: " << frameBytes << " bytes.\n";
     if (fileSize < frameBytes) {
         std::cerr << "[Error] File is too small to contain even ONE frame!\n";
     }
 
-    std::ofstream osLuma(lumaFile, std::ios::binary);
-    std::ofstream osChroma(chromaFile, std::ios::binary);
+    OutputState outputState;
+    outputState.mode = outputMode;
+    outputState.rawContent = rawContent;
+    if (outputMode == OutputMode::Tbc) {
+        outputState.osLuma.open(lumaFile, std::ios::binary);
+        outputState.osChroma.open(chromaFile, std::ios::binary);
+        if (!outputState.osLuma.is_open() || !outputState.osChroma.is_open()) {
+            std::cerr << "[Error] Failed to open one or both TBC output files for writing.\n";
+            return -1;
+        }
+    } else if (writeRawToStdout) {
+        outputState.rawStream = &std::cout;
+    } else {
+        outputState.osRaw.open(rawOutPath, std::ios::binary);
+        if (!outputState.osRaw.is_open()) {
+            std::cerr << "[Error] Failed to open raw output file for writing: " << rawOutPath << "\n";
+            return -1;
+        }
+        outputState.rawStream = &outputState.osRaw;
+    }
 
-    // Initialize ONNX (with exception handling)   (初始化 ONNX (加上异常捕获))
-    std::cout << "Initializing ONNX Runtime...\n";
+    // Initialize ONNX (with exception handling)
+    log << "Initializing ONNX Runtime...\n";
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "nnTransform3D");
     Ort::SessionOptions session_options;
 
-  
-    // --- TensorRT + CUDA Fallback Configuration ---   (--- TensorRT + CUDA Fallback 配置 ---)
+    // --- TensorRT + CUDA Fallback Configuration ---
     try {
-        // 1. Configure TensorRT   (1. 配置 TensorRT)
+        // 1. Configure TensorRT
         OrtTensorRTProviderOptions trt_options{};
         trt_options.device_id = 0;
 
-        // Enable FP16, leverage Tensor Core for immense speedup   (开启 FP16，利用 Tensor Core 大幅提速)
+        // Enable FP16, leverage Tensor Core for immense speedup
         trt_options.trt_fp16_enable = 1;
 
-        // Enable Engine cache   (开启 Engine 缓存)
-        // It takes a few minutes for TensorRT to compile ONNX into an Engine for the first time.   (TensorRT 首次将 ONNX 编译成 Engine 需要几分钟时间。)
-        // With cache enabled, only the first run will be slow; subsequent startups will only take a few seconds.   (开启缓存后，只有第一次跑会很慢，之后启动只需几秒钟。)
+        // Enable Engine cache
+        // It takes a few minutes for TensorRT to compile ONNX into an Engine for the first time.
+        // With cache enabled, only the first run will be slow; subsequent startups will only take a few seconds.
         trt_options.trt_engine_cache_enable = 1;
-        trt_options.trt_engine_cache_path = "./trt_cache"; // Ensure the current directory has write permissions   (确保当前目录有写入权限)
+        trt_options.trt_engine_cache_path = "./trt_cache"; // Ensure the current directory has write permissions
 
-        // Append TensorRT Provider   (追加 TensorRT Provider)
+        // Append TensorRT Provider
         session_options.AppendExecutionProvider_TensorRT(trt_options);
-        std::cout << "TensorRT Execution Provider appended successfully." << std::endl;
+        log << "TensorRT Execution Provider appended successfully." << std::endl;
 
-        // 2. Configure CUDA as fallback   (2. 配置 CUDA 作为后备 (Fallback))
+        // 2. Configure CUDA as fallback
         OrtCUDAProviderOptions cuda_options;
         cuda_options.device_id = 0;
         cuda_options.arena_extend_strategy = 0;
         session_options.AppendExecutionProvider_CUDA(cuda_options);
-        std::cout << "CUDA Fallback Provider appended successfully." << std::endl;
+        log << "CUDA Fallback Provider appended successfully." << std::endl;
     }
     catch (const std::exception& e) {
         std::cerr << "Failed to append CUDA provider: " << e.what() << std::endl;
         std::cerr << "Falling back to CPU..." << std::endl;
     }
 
- 
     std::unique_ptr<Ort::Session> session;
     try {
         session = std::make_unique<Ort::Session>(env, ORT_TSTR("chroma_net.onnx"), session_options);
-        std::cout << "ONNX Session loaded successfully.\n";
+        log << "ONNX Session loaded successfully.\n";
     }
     catch (const std::exception& e) {
         std::cerr << "Error] ONNX Runtime Exception: " << e.what() << "\n";
@@ -544,43 +709,36 @@ int main(int argc, char** argv) {
 
     FrameBuffer frame0, frame1;
 
-    // --- 1. Startup phase (LookBehind) ---   (--- 1. 啟動階段 (LookBehind) ---)
-    std::cout << "Entering Phase 1: LookBehind (Reading first frame)...\n";
+    // --- 1. Startup phase (LookBehind) ---
+    log << "Entering Phase 1: LookBehind (Reading first frame)...\n";
     frame0.isPadding = true;
     if (!readInterlacedFrame(is, frame1)) {
         std::cerr << "[Error] Failed at initial frame read. Exiting.\n";
         return 0;
     }
-    // Send the newly read first frame into GPU   (把剛讀取的第一格畫面送進 GPU)
     cudaMemcpy(frame1.d_cvbs, frame1.cvbs.data(), FRAME_WIDTH * FRAME_HEIGHT * sizeof(uint16_t), cudaMemcpyHostToDevice);
 
-    std::cout << "First frame read successfully. Executing first 3D split...\n";
+    log << "First frame read successfully. Executing first 3D split...\n";
     processSplit3D(frame0, frame1, *session, activeVideoStart, activeVideoEnd);
 
     std::swap(frame0, frame1);
     frame1.resetOLA();
 
-    // --- 2. Main loop ---   (--- 2. 主迴圈 ---)
-    std::cout << "Entering Phase 2: Main Processing Loop...\n";
+    // --- 2. Main loop ---
+    log << "Entering Phase 2: Main Processing Loop...\n";
     int frameCount = 1;
     while (readInterlacedFrame(is, frame1)) {
         try {
-            // Immediately send to GPU upon reading each frame   (每讀取一格，就立刻送進 GPU)
             cudaMemcpy(frame1.d_cvbs, frame1.cvbs.data(), FRAME_WIDTH * FRAME_HEIGHT * sizeof(uint16_t), cudaMemcpyHostToDevice);
-            
             processSplit3D(frame0, frame1, *session, activeVideoStart, activeVideoEnd);
-            
-            // After processing, fetch back the overlap-added Chroma and Weight from GPU to CPU   (處理完畢後，把 GPU 疊接相加好的 Chroma 和 Weight 拿回 CPU)
             cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
             cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
-            
-            // Write back to disk   (寫入硬碟)
-            finalizeAndWriteOutput(frame0, osLuma, osChroma, activeVideoStart, activeVideoEnd);
+            finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
         }
         catch (const std::exception& e) {
             std::cerr << "\n[Fatal Crash at Frame " << frameCount << "] " << e.what() << "\n";
             std::cerr << "Emergency saving and exiting...\n";
-            break; 
+            break;
         }
 
         std::swap(frame0, frame1);
@@ -588,21 +746,21 @@ int main(int argc, char** argv) {
 
         frameCount++;
         if (frameCount % 100 == 0) {
-            std::cout << "[Info] Processed " << frameCount << " frames...\n";
+            log << "[Info] Processed " << frameCount << " frames...\n";
         }
     }
 
-    // --- 3. Finalization phase (LookAhead) ---   (--- 3. 收尾階段 (LookAhead) ---)
-    std::cout << "Entering Phase 3: LookAhead (Finalizing last frame)...\n";
+    // --- 3. Finalization phase (LookAhead) ---
+    log << "Entering Phase 3: LookAhead (Finalizing last frame)...\n";
     frame1.isPadding = true;
     processSplit3D(frame0, frame1, *session, activeVideoStart, activeVideoEnd);
-    
-    // Bring the final frame results back to CPU   (把最後一格的結果拿回 CPU)
+
     cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
-    
-    finalizeAndWriteOutput(frame0, osLuma, osChroma, activeVideoStart, activeVideoEnd);
+    finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
 
-    std::cout << "All Done! Total frames processed: " << frameCount << "\n";
+    log << "All Done! Total frames processed: " << frameCount << "\n";
     return 0;
 }
+
+
