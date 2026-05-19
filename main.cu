@@ -13,12 +13,12 @@
 #include <onnxruntime_cxx_api.h>
 
 
-// 这是一个运行在 GPU 上的核函数
+// This is a kernel function running on the GPU   (这是一个运行在 GPU 上的核函数)
 __global__ void applyMaskKernel(cufftDoubleComplex* d_out_batch, const float* d_mask, int total_elements) {
-    // 获取当前 GPU 线程的全局唯一 ID
+    // Get the global unique ID of the current GPU thread   (获取当前 GPU 线程的全局唯一 ID)
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     
-    // 防御性边界检查
+    // Defensive boundary check   (防御性边界检查)
     if (idx < total_elements) {
         float gain = d_mask[idx];
         d_out_batch[idx].x *= gain;
@@ -26,13 +26,13 @@ __global__ void applyMaskKernel(cufftDoubleComplex* d_out_batch, const float* d_
     }
 }
 
-// 运行在 GPU 上的核函数：极速计算 Magnitude 和对称特征 (RefMag)
+// Kernel function running on the GPU: ultra-fast calculation of Magnitude and symmetric features (RefMag)   (运行在 GPU 上的核函数：极速计算 Magnitude 和对称特征 (RefMag))
 __global__ void calcMagnitudeKernel(const cufftDoubleComplex* d_out_batch, float* d_trt_input, int num_blocks, int block_size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= num_blocks * block_size) return;
 
-    int b = idx / block_size;  // 当前处于第几个 block
-    int i = idx % block_size;  // 当前在 block 内的偏移量
+    int b = idx / block_size;  // Current block index   (当前处于第几个 block)
+    int i = idx % block_size;  // Current offset within the block   (当前在 block 内的偏移量)
 
    
     int Nx = 16, Ny = 16, Nt = 4;
@@ -44,24 +44,24 @@ __global__ void calcMagnitudeKernel(const cufftDoubleComplex* d_out_batch, float
     // Channel 0: Mag
     double mag = sqrt(d_out_batch[idx].x * d_out_batch[idx].x + d_out_batch[idx].y * d_out_batch[idx].y);
 
-    // Channel 1: RefMag (处理对称翻转)
+    // Channel 1: RefMag (handles symmetrical flipping)   (Channel 1: RefMag (处理对称翻转))
     int ref_t = (2 - t) % 4; if (ref_t < 0) ref_t += 4;
     int ref_y = (16 - y) % 16;
     int ref_x = (8 - x) % 16; if (ref_x < 0) ref_x += 16;
     int idx_ref = b * block_size + (ref_t * Ny * Nx + ref_y * Nx + ref_x);
     double mag_ref = sqrt(d_out_batch[idx_ref].x * d_out_batch[idx_ref].x + d_out_batch[idx_ref].y * d_out_batch[idx_ref].y);
 
-    // 写入 TensorRT 输入张量显存
-    // 数据形状: [num_blocks, 2, Nt, Ny, Nx]
-    int out_idx_0 = b * (2 * block_size) + 0 * block_size + i; // Channel 0 偏移
-    int out_idx_1 = b * (2 * block_size) + 1 * block_size + i; // Channel 1 偏移
+    // Write into TensorRT input tensor VRAM   (写入 TensorRT 输入张量显存)
+    // Data shape: [num_blocks, 2, Nt, Ny, Nx]   (数据形状: [num_blocks, 2, Nt, Ny, Nx])
+    int out_idx_0 = b * (2 * block_size) + 0 * block_size + i; // Channel 0 offset   (Channel 0 偏移)
+    int out_idx_1 = b * (2 * block_size) + 1 * block_size + i; // Channel 1 offset   (Channel 1 偏移)
 
    
     d_trt_input[out_idx_0] = (float)(mag / 128.0);
     d_trt_input[out_idx_1] = (float)(mag_ref / 128.0);
 }
 
-// 核函数 1：让 5000 个线程各自算自己 Block 的 DC (平均值)
+// Kernel 1: let 5000 threads each calculate the DC (average) of their own block   (核函数 1：让 5000 个线程各自算自己 Block 的 DC (平均值))
 __global__ void calcDCKernel(const uint16_t* d_cvbs_f0, const uint16_t* d_cvbs_f1, bool pad_f0, bool pad_f1,
                              const int* d_ledger_y, const int* d_ledger_x, double* d_ledger_dc, 
                              int num_blocks, int activeStartX, int activeEndX) {
@@ -93,7 +93,7 @@ __global__ void calcDCKernel(const uint16_t* d_cvbs_f0, const uint16_t* d_cvbs_f
     d_ledger_dc[b] = (pixelCount > 0) ? (blockDC / pixelCount) : 0.0;
 }
 
-// 核函数 2：瞬间完成去直流、加窗、打包
+// Kernel 2: instantly complete DC removal, windowing, and packing   (核函数 2：瞬间完成去直流、加窗、打包)
 __global__ void packAndWindowKernel(const uint16_t* d_cvbs_f0, const uint16_t* d_cvbs_f1, bool pad_f0, bool pad_f1,
                                     cufftDoubleComplex* d_in_batch, const int* d_ledger_y, const int* d_ledger_x, const double* d_ledger_dc,
                                     const double* d_winT, const double* d_winY, const double* d_winX,
@@ -119,7 +119,7 @@ __global__ void packAndWindowKernel(const uint16_t* d_cvbs_f0, const uint16_t* d
     d_in_batch[idx].y = 0.0;
 }
 
-// 核函数 3：显存内安全叠接相加 (OLA)
+// Kernel 3: Safe overlap-add (OLA) in VRAM   (核函数 3：显存内安全叠接相加 (OLA))
 __global__ void olaKernel(const cufftDoubleComplex* d_in_batch, double* d_accChroma_f0, double* d_accChroma_f1,
                           double* d_weightSum_f0, double* d_weightSum_f1, bool pad_f0, bool pad_f1,
                           const int* d_ledger_y, const int* d_ledger_x, const double* d_winT, const double* d_winY, const double* d_winX,
@@ -140,7 +140,7 @@ __global__ void olaKernel(const cufftDoubleComplex* d_in_batch, double* d_accChr
         double w = d_winT[t] * d_winY[dy] * d_winX[dx];
         int frame_idx = absY * 910 + absX;
 
-        // 原子加法：防止几万个线程同时写入同一个像素发生冲突！
+        // Atomic addition: prevent conflicts from tens of thousands of threads writing to the same pixel simultaneously!   (原子加法：防止几万个线程同时写入同一个像素发生冲突！)
         atomicAdd((t < 2) ? &d_accChroma_f0[frame_idx] : &d_accChroma_f1[frame_idx], val * w);
         atomicAdd((t < 2) ? &d_weightSum_f0[frame_idx] : &d_weightSum_f1[frame_idx], w * w);
     }
@@ -150,29 +150,29 @@ __global__ void olaKernel(const cufftDoubleComplex* d_in_batch, double* d_accChr
 #define M_PI 3.14159265358979323846
 #endif
 
-// --- 基础常量 ---
+// --- Basic constants ---   (--- 基础常量 ---)
 const int FIELD_WIDTH = 910;
 const int FIELD_HEIGHT = 263;
 const int FRAME_WIDTH = 910;
 const int FRAME_HEIGHT = 526; // 263 * 2
 
-// 垂直 Active 区域 
+// Vertical Active region   (垂直 Active 区域 )
 const int ACTIVE_START_Y = 40;
 const int ACTIVE_END_Y = 525;
 
-// 3D 窗口参数
+// 3D window parameters   (3D 窗口参数)
 const int Nx = 16, Ny = 16, Nt = 4;
-const int STEP_X = 8, STEP_Y = 8; // 50% 空间重叠
+const int STEP_X = 8, STEP_Y = 8; // 50% spatial overlap   (50% 空间重叠)
 
 
-// --- 数据结构 ---
+// --- Data structures ---   (--- 数据结构 ---)
 struct FrameBuffer {
     bool isPadding;
     std::vector<uint16_t> cvbs;
     std::vector<double> accChroma;
     std::vector<double> weightSum;
 
-    // GPU 显存指针
+    // GPU VRAM pointers   (GPU 显存指针)
     uint16_t* d_cvbs = nullptr;
     double* d_accChroma = nullptr;
     double* d_weightSum = nullptr;
@@ -182,7 +182,7 @@ struct FrameBuffer {
         accChroma.resize(FRAME_WIDTH * FRAME_HEIGHT, 0.0);
         weightSum.resize(FRAME_WIDTH * FRAME_HEIGHT, 0.0);
         
-        // 初始化时直接在显存里开辟好空间
+        // Pre-allocate space in VRAM directly during initialization   (初始化时直接在显存里开辟好空间)
         cudaMalloc((void**)&d_cvbs, FRAME_WIDTH * FRAME_HEIGHT * sizeof(uint16_t));
         cudaMalloc((void**)&d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double));
         cudaMalloc((void**)&d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double));
@@ -192,7 +192,7 @@ struct FrameBuffer {
         isPadding = false;
         std::fill(accChroma.begin(), accChroma.end(), 0.0);
         std::fill(weightSum.begin(), weightSum.end(), 0.0);
-        // 显存也同步清零
+        // VRAM is also cleared synchronously   (显存也同步清零)
         cudaMemset(d_accChroma, 0, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double));
         cudaMemset(d_weightSum, 0, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double));
     }
@@ -200,28 +200,28 @@ struct FrameBuffer {
    
 };
 
-// --- 辅助函数：计算一维索引 ---
+// --- Helper function: compute 1D index ---   (--- 辅助函数：计算一维索引 ---)
 inline int IDX3(int t, int y, int x, int _Nt, int _Ny, int _Nx) {
     return (t * _Ny * _Nx) + (y * _Nx) + x;
 }
 
-// --- 文件读取与交织 ---
+// --- File reading and interlacing ---   (--- 文件读取与交织 ---)
 bool readInterlacedFrame(std::ifstream& is, FrameBuffer& frame) {
     std::vector<uint16_t> field0(FIELD_WIDTH * FIELD_HEIGHT);
     std::vector<uint16_t> field1(FIELD_WIDTH * FIELD_HEIGHT);
 
-    // 尝试读取第一场
+    // Try to read the first field   (尝试读取第一场)
     if (!is.read(reinterpret_cast<char*>(field0.data()), field0.size() * sizeof(uint16_t))) {
         std::cerr << " Failed to read Field 0! Either EOF reached or file is too small.\n";
         return false;
     }
-    // 尝试读取第二场
+    // Try to read the second field   (尝试读取第二场)
     if (!is.read(reinterpret_cast<char*>(field1.data()), field1.size() * sizeof(uint16_t))) {
         std::cerr << " Failed to read Field 1! EOF reached while expecting second field.\n";
         return false;
     }
 
-    // 交织为帧 (Even/Odd Lines)
+    // Interlace into frame (Even/Odd Lines)   (交织为帧 (Even/Odd Lines))
     for (int y = 0; y < FIELD_HEIGHT; ++y) {
         if (y * 2 < FRAME_HEIGHT) {
             std::copy(&field0[y * FIELD_WIDTH], &field0[(y + 1) * FIELD_WIDTH], &frame.cvbs[y * 2 * FRAME_WIDTH]);
@@ -233,18 +233,18 @@ bool readInterlacedFrame(std::ifstream& is, FrameBuffer& frame) {
     return true;
 }
 
-// --- 核心 3D 滤镜 ---
-// --- 批处理账本结构体 ---
+// --- Core 3D filter ---   (--- 核心 3D 滤镜 ---)
+// --- Batch ledger structure ---   (--- 批处理账本结构体 ---)
 struct BlockMeta {
     int y;
     int x;
     double blockDC;
 };
 
-// --- 核心 3D 滤镜 (Batched 高性能版) ---
+// --- Core 3D filter (Batched high-performance version) ---   (--- 核心 3D 滤镜 (Batched 高性能版) ---)
 void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int activeStartX, int activeEndX) {
 
-    // 1. 生成 3D 正弦窗
+    // 1. Generate 3D sine window   (1. 生成 3D 正弦窗)
     std::vector<double> winX(Nx), winY(Ny), winT(Nt);
     for (int i = 0; i < Nx; ++i) winX[i] = sin(M_PI * (i + 0.5) / Nx);
     for (int i = 0; i < Ny; ++i) winY[i] = sin(M_PI * (i + 0.5) / Ny);
@@ -253,7 +253,7 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
     int startY_loop = ACTIVE_START_Y - (Ny / 2);
     int startX_loop = activeStartX - (Nx / 2);
 
-    // 2. 精准计算当前帧的 Block 总数 (保证批处理内存分配绝对安全)
+    // 2. Precisely calculate the total number of blocks for the current frame (guarantees absolute safety of batch memory allocation)   (2. 精准计算当前帧的 Block 总数 (保证批处理内存分配绝对安全))
     int num_blocks = 0;
     for (int y = startY_loop; y < ACTIVE_END_Y; y += STEP_Y) {
         for (int x = startX_loop; x < activeEndX; x += STEP_X) {
@@ -261,17 +261,17 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
         }
     }
 
-    if (num_blocks == 0) return; // 防御性判断
+    if (num_blocks == 0) return; // Defensive check   (防御性判断)
 
 
-   // 3. 静态内存池与 cuFFT 配置
+   // 3. Static memory pool and cuFFT configuration   (3. 静态内存池与 cuFFT 配置)
     size_t block_size = Nt * Ny * Nx; // 4 * 16 * 16 = 1024
 
-    // Host (CPU) 内存：用于我们之前的 for 循环组装数据
+    // Host (CPU) memory: used for data assembly in our previous for loop   (Host (CPU) 内存：用于我们之前的 for 循环组装数据)
     static cufftDoubleComplex* h_in_batch = nullptr;
     static cufftDoubleComplex* h_out_batch = nullptr;
     
-    // Device (GPU) 显存：用于 cuFFT 高速计算
+    // Device (GPU) VRAM: used for high-speed cuFFT computation   (Device (GPU) 显存：用于 cuFFT 高速计算)
     static cufftDoubleComplex* d_in_batch = nullptr;
     static cufftDoubleComplex* d_out_batch = nullptr;
     
@@ -291,11 +291,11 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
 
         size_t bytes = sizeof(cufftDoubleComplex) * num_blocks * block_size;
         
-        // 分配 CPU 内存
+        // Allocate CPU memory   (分配 CPU 内存)
         h_in_batch = (cufftDoubleComplex*)malloc(bytes);
         h_out_batch = (cufftDoubleComplex*)malloc(bytes);
         
-        // 分配 GPU 显存
+        // Allocate GPU VRAM   (分配 GPU 显存)
         cudaMalloc((void**)&d_in_batch, bytes);
         cudaMalloc((void**)&d_out_batch, bytes);
 
@@ -303,7 +303,7 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
             throw std::runtime_error("Fatal Error: Memory allocation failed!");
         }
 
-        // 创建 cuFFT 计划 (CUFFT_Z2Z 代表 Double-Precision Complex to Complex)
+        // Create cuFFT plan (CUFFT_Z2Z stands for Double-Precision Complex to Complex)   (创建 cuFFT 计划 (CUFFT_Z2Z 代表 Double-Precision Complex to Complex))
         int n[] = { Nt, Ny, Nx };
         cufftPlanMany(&p_fwd, 3, n, NULL, 1, block_size, NULL, 1, block_size, CUFFT_Z2Z, num_blocks);
         cufftPlanMany(&p_inv, 3, n, NULL, 1, block_size, NULL, 1, block_size, CUFFT_Z2Z, num_blocks);
@@ -312,8 +312,8 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
     }
 
     std::vector<BlockMeta> batchLedger;
-   // ================= 全新階段一：資料打包與記帳 (交給 GPU) =================
-    // 1. CPU 只負責算一下座標，不碰像素
+   // ================= Brand new phase one: Data packing and accounting (handed over to GPU) =================   (================= 全新階段一：資料打包與記帳 (交給 GPU) =================)
+    // 1. CPU is only responsible for calculating coordinates, does not touch pixels   (1. CPU 只負責算一下座標，不碰像素)
     std::vector<int> h_ledger_y(num_blocks), h_ledger_x(num_blocks);
     int b_idx = 0;
     for (int y = startY_loop; y < ACTIVE_END_Y; y += STEP_Y) {
@@ -322,7 +322,7 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
         }
     }
 
-    // 2. 靜態分配座標與窗函數的 GPU 顯存 (只分配一次)
+    // 2. Statically allocate GPU VRAM for coordinates and window functions (allocated only once)   (2. 靜態分配座標與窗函數的 GPU 顯存 (只分配一次))
     static int *d_ledger_y = nullptr, *d_ledger_x = nullptr;
     static double *d_ledger_dc = nullptr, *d_winX = nullptr, *d_winY = nullptr, *d_winT = nullptr;
     static int cached_ledger_blocks = 0;
@@ -338,28 +338,28 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
         cached_ledger_blocks = num_blocks;
     }
 
-    // 3. 把座標和窗函數拷貝給顯卡 (單格只有幾 KB，瞬間完成)
+    // 3. Copy coordinates and window functions to the graphics card (only a few KB per frame, completed instantly)   (3. 把座標和窗函數拷貝給顯卡 (單格只有幾 KB，瞬間完成))
     cudaMemcpy(d_ledger_y, h_ledger_y.data(), num_blocks * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_ledger_x, h_ledger_x.data(), num_blocks * sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_winX, winX.data(), Nx * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_winY, winY.data(), Ny * sizeof(double), cudaMemcpyHostToDevice);
     cudaMemcpy(d_winT, winT.data(), Nt * sizeof(double), cudaMemcpyHostToDevice);
 
-    // 4. 發射 Kernel 1：讓 GPU 算 DC
+    // 4. Launch Kernel 1: let GPU calculate DC   (4. 發射 Kernel 1：讓 GPU 算 DC)
     int blocksForDC = (num_blocks + 255) / 256;
     calcDCKernel<<<blocksForDC, 256>>>(f0.d_cvbs, f1.d_cvbs, f0.isPadding, f1.isPadding, 
                                        d_ledger_y, d_ledger_x, d_ledger_dc, num_blocks, activeStartX, activeEndX);
 
-    // 5. 發射 Kernel 2：讓 GPU 瞬間完成去直流、加窗、打包
+    // 5. Launch Kernel 2: let GPU instantly complete DC removal, windowing, and packing   (5. 發射 Kernel 2：讓 GPU 瞬間完成去直流、加窗、打包)
     int total_elements = num_blocks * block_size;
     int blocksForAll = (total_elements + 255) / 256;
     packAndWindowKernel<<<blocksForAll, 256>>>(f0.d_cvbs, f1.d_cvbs, f0.isPadding, f1.isPadding, d_in_batch,
                                                d_ledger_y, d_ledger_x, d_ledger_dc, d_winT, d_winY, d_winX,
                                                num_blocks, block_size, activeStartX, activeEndX);
-    cudaDeviceSynchronize(); // 確保資料打包完畢
+    cudaDeviceSynchronize(); // Ensure data packing is complete   (確保資料打包完畢)
 
 
-    // ================= 階段二：高併發推理與 IOBinding =================
+    // ================= Phase two: High-concurrency inference and IOBinding =================   (================= 階段二：高併發推理與 IOBinding =================)
 
     cufftExecZ2Z(p_fwd, d_in_batch, d_out_batch, CUFFT_FORWARD);
 
@@ -375,7 +375,7 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
         cached_tensor_elements = tensor_elements;
     }
 
-    // 發射 Mag Kernel，並由 TensorRT 直接讀取顯存
+    // Launch Mag Kernel, and let TensorRT read VRAM directly   (發射 Mag Kernel，並由 TensorRT 直接讀取顯存)
     calcMagnitudeKernel<<<blocksForAll, 256>>>(d_out_batch, d_trt_input, num_blocks, block_size);
     cudaDeviceSynchronize(); 
 
@@ -396,19 +396,19 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
     cudaDeviceSynchronize();
 
 
-    // ================= 全新階段三：顯存內疊接相加 (OLA) =================
+    // ================= Brand new phase three: In-VRAM overlap-add (OLA) =================   (================= 全新階段三：顯存內疊接相加 (OLA) =================)
     cufftExecZ2Z(p_inv, d_out_batch, d_in_batch, CUFFT_INVERSE);
 
-    // 發射 Kernel 3：讓 GPU 瞬間完成所有像素的重疊累加，寫進 d_accChroma 顯存中！
+    // Launch Kernel 3: let GPU instantly complete the overlapping accumulation of all pixels, writing to d_accChroma VRAM!   (發射 Kernel 3：讓 GPU 瞬間完成所有像素的重疊累加，寫進 d_accChroma 显存中！)
     olaKernel<<<blocksForAll, 256>>>(d_in_batch, f0.d_accChroma, f1.d_accChroma, f0.d_weightSum, f1.d_weightSum,
                                      f0.isPadding, f1.isPadding, d_ledger_y, d_ledger_x, d_winT, d_winY, d_winX,
                                      num_blocks, block_size, activeStartX, activeEndX);
     cudaDeviceSynchronize();
 } 
 
-// --- 结算与写入 ---
+// --- Finalization and writing ---   (--- 结算与写入 ---)
 void finalizeAndWriteOutput(FrameBuffer& frame, std::ofstream& osLuma, std::ofstream& osChroma, int activeStartX, int activeEndX) {
-    if (frame.isPadding) return; // 绝对防御
+    if (frame.isPadding) return; // Absolute defense   (绝对防御)
 
     std::vector<uint16_t> lumaOut(FRAME_WIDTH * FRAME_HEIGHT);
     std::vector<uint16_t> chromaOut(FRAME_WIDTH * FRAME_HEIGHT);
@@ -417,14 +417,14 @@ void finalizeAndWriteOutput(FrameBuffer& frame, std::ofstream& osLuma, std::ofst
         for (int x = 0; x < FRAME_WIDTH; ++x) {
             int idx = y * FRAME_WIDTH + x;
 
-            // 如果处于有效画面左侧（包含 Sync 和 Color Burst）或右侧（Front Porch）
+            // If on the left side of the active picture (including Sync and Color Burst) or right side (Front Porch)   (如果处于有效画面左侧（包含 Sync 和 Color Burst）或右侧（Front Porch）)
             if (x < activeStartX || x >= activeEndX) {
-                // 原样复制原始的 CVBS 信号
+                // Copy original CVBS signal as is   (原样复制原始的 CVBS 信号)
                 lumaOut[idx] = frame.cvbs[idx];
                 chromaOut[idx] = frame.cvbs[idx];
             }
             else {
-                // 有效图像区域：使用神经网络 3D 分离出的结果
+                // Active image area: use the result separated by the neural network 3D   (有效图像区域：使用神经网络 3D 分离出的结果)
                 double chromaVal = 0.0;
                 if (frame.weightSum[idx] > 0.00001) {
                     chromaVal = frame.accChroma[idx] / frame.weightSum[idx];
@@ -432,14 +432,14 @@ void finalizeAndWriteOutput(FrameBuffer& frame, std::ofstream& osLuma, std::ofst
 
                 double lumaVal = frame.cvbs[idx] - chromaVal;
 
-                // 钳位并加上 Chroma 的 32768 中性灰偏移
+                // Clamp and add Chroma's 32768 neutral gray offset   (钳位并加上 Chroma 的 32768 中性灰偏移)
                 lumaOut[idx] = std::min(std::max((int)std::round(lumaVal), 0), 65535);
                 chromaOut[idx] = std::min(std::max((int)std::round(chromaVal + 32768.0), 0), 65535);
             }
         }
     }
 
-    // 将 Frame 拆回两个 Field 写入，保持 TBC 兼容性
+    // Split the Frame back into two Fields for writing, to maintain TBC compatibility   (将 Frame 拆回两个 Field 写入，保持 TBC 兼容性)
     for (int field = 0; field < 2; ++field) {
         std::vector<uint16_t> fieldLuma(FIELD_WIDTH * FIELD_HEIGHT);
         std::vector<uint16_t> fieldChroma(FIELD_WIDTH * FIELD_HEIGHT);
@@ -456,11 +456,11 @@ void finalizeAndWriteOutput(FrameBuffer& frame, std::ofstream& osLuma, std::ofst
     }
 }
 
-// --- 主程序 ---
+// --- Main program ---   (--- 主程序 ---)
 int main(int argc, char** argv) {
     int activeVideoStart = 132;
     int activeVideoEnd = 896;
-    std::string inFile = "asdfqazsnbb.tbc"; // 如果不传参，默认处理
+    std::string inFile = "asdfqazsnbb.tbc"; // Default processing if no parameters are passed   (如果不传参，默认处理)
 
     if (argc >= 2) inFile = argv[1];
     if (argc >= 3) activeVideoStart = std::stoi(argv[2]);
@@ -478,13 +478,13 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    // 检查文件大小
+    // Check file size   (检查文件大小)
     is.seekg(0, std::ios::end);
     long long fileSize = is.tellg();
-    is.seekg(0, std::ios::beg); // 游标归位
+    is.seekg(0, std::ios::beg); // Reset cursor   (游标归位)
     std::cout << "File opened successfully. Size: " << fileSize << " bytes.\n";
 
-    // 算一下一帧需要的字节数: 910 * 263 * 2场 * 2字节(uint16)
+    // Calculate the number of bytes needed for one frame: 910 * 263 * 2 fields * 2 bytes (uint16)   (算一下一帧需要的字节数: 910 * 263 * 2场 * 2字节(uint16))
     long long frameBytes = FIELD_WIDTH * FIELD_HEIGHT * 2 * 2;
     std::cout << "Bytes required for ONE frame: " << frameBytes << " bytes.\n";
     if (fileSize < frameBytes) {
@@ -494,32 +494,32 @@ int main(int argc, char** argv) {
     std::ofstream osLuma(lumaFile, std::ios::binary);
     std::ofstream osChroma(chromaFile, std::ios::binary);
 
-    // 初始化 ONNX (加上异常捕获)
+    // Initialize ONNX (with exception handling)   (初始化 ONNX (加上异常捕获))
     std::cout << "Initializing ONNX Runtime...\n";
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "nnTransform3D");
     Ort::SessionOptions session_options;
 
   
-    // --- TensorRT + CUDA Fallback 配置 ---
+    // --- TensorRT + CUDA Fallback Configuration ---   (--- TensorRT + CUDA Fallback 配置 ---)
     try {
-        // 1. 配置 TensorRT
+        // 1. Configure TensorRT   (1. 配置 TensorRT)
         OrtTensorRTProviderOptions trt_options{};
         trt_options.device_id = 0;
 
-        // 开启 FP16，利用 Tensor Core 大幅提速
+        // Enable FP16, leverage Tensor Core for immense speedup   (开启 FP16，利用 Tensor Core 大幅提速)
         trt_options.trt_fp16_enable = 1;
 
-        // 开启 Engine 缓存
-        // TensorRT 首次将 ONNX 编译成 Engine 需要几分钟时间。
-        // 开启缓存后，只有第一次跑会很慢，之后启动只需几秒钟。
+        // Enable Engine cache   (开启 Engine 缓存)
+        // It takes a few minutes for TensorRT to compile ONNX into an Engine for the first time.   (TensorRT 首次将 ONNX 编译成 Engine 需要几分钟时间。)
+        // With cache enabled, only the first run will be slow; subsequent startups will only take a few seconds.   (开启缓存后，只有第一次跑会很慢，之后启动只需几秒钟。)
         trt_options.trt_engine_cache_enable = 1;
-        trt_options.trt_engine_cache_path = "./trt_cache"; // 确保当前目录有写入权限
+        trt_options.trt_engine_cache_path = "./trt_cache"; // Ensure the current directory has write permissions   (确保当前目录有写入权限)
 
-        // 追加 TensorRT Provider
+        // Append TensorRT Provider   (追加 TensorRT Provider)
         session_options.AppendExecutionProvider_TensorRT(trt_options);
         std::cout << "TensorRT Execution Provider appended successfully." << std::endl;
 
-        // 2. 配置 CUDA 作为后备 (Fallback)
+        // 2. Configure CUDA as fallback   (2. 配置 CUDA 作为后备 (Fallback))
         OrtCUDAProviderOptions cuda_options;
         cuda_options.device_id = 0;
         cuda_options.arena_extend_strategy = 0;
@@ -544,14 +544,14 @@ int main(int argc, char** argv) {
 
     FrameBuffer frame0, frame1;
 
-    // --- 1. 啟動階段 (LookBehind) ---
+    // --- 1. Startup phase (LookBehind) ---   (--- 1. 啟動階段 (LookBehind) ---)
     std::cout << "Entering Phase 1: LookBehind (Reading first frame)...\n";
     frame0.isPadding = true;
     if (!readInterlacedFrame(is, frame1)) {
         std::cerr << "[Error] Failed at initial frame read. Exiting.\n";
         return 0;
     }
-    //把剛讀取的第一格畫面送進 GPU
+    // Send the newly read first frame into GPU   (把剛讀取的第一格畫面送進 GPU)
     cudaMemcpy(frame1.d_cvbs, frame1.cvbs.data(), FRAME_WIDTH * FRAME_HEIGHT * sizeof(uint16_t), cudaMemcpyHostToDevice);
 
     std::cout << "First frame read successfully. Executing first 3D split...\n";
@@ -560,21 +560,21 @@ int main(int argc, char** argv) {
     std::swap(frame0, frame1);
     frame1.resetOLA();
 
-    // --- 2. 主迴圈 ---
+    // --- 2. Main loop ---   (--- 2. 主迴圈 ---)
     std::cout << "Entering Phase 2: Main Processing Loop...\n";
     int frameCount = 1;
     while (readInterlacedFrame(is, frame1)) {
         try {
-            // 每讀取一格，就立刻送進 GPU
+            // Immediately send to GPU upon reading each frame   (每讀取一格，就立刻送進 GPU)
             cudaMemcpy(frame1.d_cvbs, frame1.cvbs.data(), FRAME_WIDTH * FRAME_HEIGHT * sizeof(uint16_t), cudaMemcpyHostToDevice);
             
             processSplit3D(frame0, frame1, *session, activeVideoStart, activeVideoEnd);
             
-            // 處理完畢後，把 GPU 疊接相加好的 Chroma 和 Weight 拿回 CPU
+            // After processing, fetch back the overlap-added Chroma and Weight from GPU to CPU   (處理完畢後，把 GPU 疊接相加好的 Chroma 和 Weight 拿回 CPU)
             cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
             cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
             
-            // 寫入硬碟
+            // Write back to disk   (寫入硬碟)
             finalizeAndWriteOutput(frame0, osLuma, osChroma, activeVideoStart, activeVideoEnd);
         }
         catch (const std::exception& e) {
@@ -592,12 +592,12 @@ int main(int argc, char** argv) {
         }
     }
 
-    // --- 3. 收尾階段 (LookAhead) ---
+    // --- 3. Finalization phase (LookAhead) ---   (--- 3. 收尾階段 (LookAhead) ---)
     std::cout << "Entering Phase 3: LookAhead (Finalizing last frame)...\n";
     frame1.isPadding = true;
     processSplit3D(frame0, frame1, *session, activeVideoStart, activeVideoEnd);
     
-    // 把最後一格的結果拿回 CPU
+    // Bring the final frame results back to CPU   (把最後一格的結果拿回 CPU)
     cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
     
