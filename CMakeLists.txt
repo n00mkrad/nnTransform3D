@@ -8,7 +8,7 @@ set(CMAKE_CUDA_ARCHITECTURES 75 86 89 120)
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 
 
-set(ONNXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/onnxruntime-win-x64-gpu-1.23.2" CACHE PATH "Path to ONNX Runtime")
+set(ONNXRUNTIME_DIR "${CMAKE_SOURCE_DIR}/onnxruntime-win-x64-gpu" CACHE PATH "Path to ONNX Runtime")
 
 include_directories(${ONNXRUNTIME_DIR}/include)
 
