@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <memory>
 #include <filesystem>
+#include <limits>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -683,8 +684,8 @@ bool resolveModelPath(const char* argv0, const std::string& modelPathArg, bool m
 }
 
 void printUsage(const char* exeName) {
-    std::cerr << "Usage: " << exeName << " [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]\n";
-    std::cerr << "Defaults: --out-mode tbc, --gpu 0, --trt_mpi 1000, --trt_mss 1, --av-start 132, --av-end 896, --lines 480\n";
+    std::cerr << "Usage: " << exeName << " [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--start-frame <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]\n";
+    std::cerr << "Defaults: --out-mode tbc, --gpu 0, --trt_mpi 1000, --trt_mss 1, --start-frame 0, --av-start 132, --av-end 896, --lines 480\n";
 }
 
 // --- Main program ---
@@ -715,6 +716,7 @@ int main(int argc, char** argv) {
     int gpuId = 0;
     int trtMaxPartitionIterations = 1000;
     int trtMinSubgraphSize = 1;
+    int startFrame = 0;
     bool quietProgressLog = false;
 
     std::vector<std::string> positionalArgs;
@@ -797,6 +799,26 @@ int main(int argc, char** argv) {
             }
             catch (const std::exception& e) {
                 std::cerr << "[Error] Invalid --trt_mss value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--start-frame") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --start-frame.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                startFrame = std::stoi(argv[++argIndex]);
+                if (startFrame < 0) {
+                    std::cerr << "[Error] --start-frame must be a non-negative integer.\n";
+                    printUsage(argv[0]);
+                    return -1;
+                }
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --start-frame value: " << e.what() << "\n";
                 printUsage(argv[0]);
                 return -1;
             }
@@ -1140,15 +1162,48 @@ int main(int argc, char** argv) {
     // Check file size
     is.seekg(0, std::ios::end);
     long long fileSize = is.tellg();
-    is.seekg(0, std::ios::beg); // Reset cursor
     log << "File opened successfully. Size: " << fileSize << " bytes.\n";
 
     // Calculate the number of bytes needed for one frame: 910 * 263 * 2 fields * 2 bytes (uint16)
-    long long frameBytes = FIELD_WIDTH * FIELD_HEIGHT * 2 * 2;
+    const long long frameBytes = FIELD_WIDTH * FIELD_HEIGHT * 2 * 2;
     log << "Bytes required for ONE frame: " << frameBytes << " bytes.\n";
-    if (fileSize < frameBytes) {
-        std::cerr << "[Error] File is too small to contain even ONE frame!\n";
+    if (fileSize < 0) {
+        std::cerr << "[Error] Failed to determine input file size.\n";
+        return -1;
     }
+    if (frameBytes <= 0) {
+        std::cerr << "[Error] Invalid frame byte size configuration.\n";
+        return -1;
+    }
+
+    const long long totalFramesAvailable = fileSize / frameBytes;
+    if (totalFramesAvailable <= 0) {
+        std::cerr << "[Error] File is too small to contain even ONE frame!\n";
+        return -1;
+    }
+    if (startFrame >= totalFramesAvailable) {
+        std::cerr << "[Error] --start-frame " << startFrame << " is out of range. Available frame indices: 0.." << (totalFramesAvailable - 1) << ".\n";
+        return -1;
+    }
+
+    const long long decodeStartFrame = (startFrame > 0) ? static_cast<long long>(startFrame - 1) : 0LL;
+    if (decodeStartFrame > (std::numeric_limits<long long>::max() / frameBytes)) {
+        std::cerr << "[Error] --start-frame produced an overflow while computing byte offset.\n";
+        return -1;
+    }
+    const long long decodeStartByteOffset = decodeStartFrame * frameBytes;
+    is.clear();
+    is.seekg(static_cast<std::streamoff>(decodeStartByteOffset), std::ios::beg); // Seek to requested decode start.
+    if (!is.good()) {
+        std::cerr << "[Error] Failed to seek to requested --start-frame position.\n";
+        return -1;
+    }
+
+    const bool suppressPreRollOutput = (startFrame > 0);
+    log << "Input Frames Available: " << totalFramesAvailable << "\n";
+    log << "Start Frame (0-based): " << startFrame << "\n";
+    log << "Decode Start Frame: " << decodeStartFrame << (suppressPreRollOutput ? " (pre-roll enabled)\n" : "\n");
+    log << "Decode Start Byte Offset: " << decodeStartByteOffset << "\n";
 
     OutputState outputState;
     outputState.mode = outputMode;
@@ -1186,6 +1241,7 @@ int main(int argc, char** argv) {
             y4mConfig.activeVideoEndOverride = fullFrame ? -1 : activeVideoEnd;
             y4mConfig.firstLine = firstLine;
             y4mConfig.lastLine = lastLine;
+            y4mConfig.frameIndexOffset = static_cast<std::size_t>(startFrame);
             outputState.y4mWriter = std::make_unique<Y4mNtscWriter>(metadata, y4mConfig, *y4mStream);
         }
         catch (const std::exception& e) {
@@ -1275,7 +1331,9 @@ int main(int argc, char** argv) {
 
     // --- 2. Main loop ---
     log << "Entering Phase 2: Main Processing Loop...\n";
-    int frameCount = 1;
+    bool dropNextOutputFrame = suppressPreRollOutput;
+    int decodedFrameCount = 1;
+    int emittedFrameCount = 0;
     while (readInterlacedFrame(is, frame1)) {
         try {
             // Immediately send to GPU upon reading each frame
@@ -1284,11 +1342,17 @@ int main(int argc, char** argv) {
             // After processing, fetch back the overlap-added Chroma and Weight from GPU to CPU
             cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
             cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
-            // Write back to disk or raw stream
-            finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
+            if (dropNextOutputFrame) {
+                log << "Skipping pre-roll output frame at source index " << decodeStartFrame << ".\n";
+                dropNextOutputFrame = false;
+            } else {
+                // Write back to disk or raw stream
+                finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
+                emittedFrameCount++;
+            }
         }
         catch (const std::exception& e) {
-            std::cerr << "\n[Fatal Crash at Frame " << frameCount << "] " << e.what() << "\n";
+            std::cerr << "\n[Fatal Crash at Decode Frame " << decodedFrameCount << "] " << e.what() << "\n";
             std::cerr << "Emergency saving and exiting...\n";
             break;
         }
@@ -1296,9 +1360,9 @@ int main(int argc, char** argv) {
         std::swap(frame0, frame1);
         frame1.resetOLA();
 
-        frameCount++;
-        if (!quietProgressLog && frameCount % 100 == 0) {
-            log << "[Info] Processed " << frameCount << " frames...\n";
+        decodedFrameCount++;
+        if (!quietProgressLog && emittedFrameCount > 0 && emittedFrameCount % 100 == 0) {
+            log << "[Info] Processed " << emittedFrameCount << " frames...\n";
         }
     }
 
@@ -1310,9 +1374,14 @@ int main(int argc, char** argv) {
     // Bring the final frame results back to CPU
     cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
     cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
-    finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
+    if (dropNextOutputFrame) {
+        log << "Skipping pre-roll output frame at source index " << decodeStartFrame << ".\n";
+    } else {
+        finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
+        emittedFrameCount++;
+    }
 
-    log << "All Done! Total frames processed: " << frameCount << "\n";
+    log << "All Done! Total decode frames: " << decodedFrameCount << ", emitted frames: " << emittedFrameCount << "\n";
     return 0;
 }
 

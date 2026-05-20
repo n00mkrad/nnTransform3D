@@ -196,6 +196,7 @@ Y4mNtscWriter::Y4mNtscWriter(const LdJsonMetadata& metadata_, const Y4mNtscConfi
     if (phases.empty()) throw std::runtime_error("Metadata fields[] does not contain valid fieldPhaseID values in range 1..4.");
     const std::size_t period = inferCyclePeriod(phases);
     phaseCycle.assign(phases.begin(), phases.begin() + static_cast<std::ptrdiff_t>(period));
+    frameIndex = config.frameIndexOffset;
 
     const char interlaceTag = metadata.fields.front().isFirstField ? 't' : 'b';
     const char* aspectTag = metadata.videoParameters.isWidescreen ? "25:22" : "352:413";

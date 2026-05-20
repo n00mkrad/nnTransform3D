@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <ostream>
 #include <string>
@@ -36,6 +37,7 @@ struct Y4mNtscConfig {
     int activeVideoEndOverride = -1;
     int firstLine = 40;
     int lastLine = 525;
+    std::size_t frameIndexOffset = 0;
 };
 
 bool loadLdJsonMetadata(const std::string& path, LdJsonMetadata& metadata, std::string& error);

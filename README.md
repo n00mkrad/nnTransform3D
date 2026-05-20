@@ -1,15 +1,16 @@
 ## nnTransform3D (CUDA 12 required)
 
 Basic Usage:  
-`nnTransform3D.exe [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--json <path>] [--full-frame] [--first-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
+`nnTransform3D.exe [--start-frame <num>] [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--json <path>] [--full-frame] [--first-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
 
 Full Usage:  
-`nnTransform3D.exe [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
+`nnTransform3D.exe [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--start-frame <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
 
 Options:  
 `--av-start`: Active video area start (in pixels, horizontal).  
 `--av-end`: Active video area end (in pixels, horizontal).  
 `--width`: Active video width. Used to derive `av-end` from `av-start` when `--av-end` is omitted.  
+`--start-frame`: Source frame index to start decoding from (0-based, default `0`). When `> 0`, the decoder internally pre-rolls one frame for temporal context and drops that pre-roll output.  
 `--out-mode`: Output mode, either `tbc`, `raw_y`, `raw_yc`, or `y4m`. Default: `tbc`.  
 `--tbc-pipe-mode`: TBC stdout layout for `--out-mode tbc`: `y`, `c`, `yc_alt`, or `yc_stack`. Requires `--out -`.  
 `--out`: Output path, or `-` for binary stdout. In TBC mode, `--out -` is only valid when `--tbc-pipe-mode` is set.  
@@ -44,6 +45,7 @@ Range derivation precedence:
 
 - `--out-mode y4m` writes YUV4MPEG2 `YUV444P16` limited-range frames.
 - Video is merged from separated luma and chroma using minimal `mono`/`ntsc1d` decoders. More advanced comb filters are not needed as Y/C is already cleanly separated.
+- `--start-frame` keeps Y4M phase continuity aligned to absolute source-frame position.
 - Default is active-area output, using horizontal metadata bounds (or AV overrides) and `--first-line` / `--last-line`.
 - `--full-frame` outputs full metadata geometry (`fieldWidth x ((fieldHeight * 2) - 1)`).
 - `--out -` is supported for piping Y4M to stdout.
@@ -62,6 +64,9 @@ nnTransform3D --input input.tbc --out-mode y4m --json tbc-example.json --av-star
 
 # Full-frame Y4M output
 nnTransform3D --input input.tbc --out-mode y4m --json tbc-example.json --full-frame --out output_full.y4m
+
+# Start at source frame 1000 (0-based) while preserving temporal context at the boundary
+nnTransform3D --input input.tbc --out-mode y4m --start-frame 1000 --out output_from_1000.y4m
 ```
 
 ### Default TBC File Output
@@ -107,6 +112,7 @@ nnTransform3D --input input.tbc --out-mode tbc --tbc-pipe-mode yc_stack --out - 
 - `--full-frame` keeps raw geometry at `910x526` (`raw_y`) or `910x1052` stacked (`raw_yc`).
 - Raw default names are `input_Y.raw` (`raw_y`) and `input_YC.raw` (`raw_yc`) unless `--out` is provided.
 - `--out -` can be used in raw mode to pipe the data directly into another process (e.g. ffmpeg) without writing to disk.
+- `--start-frame` is applied before all raw output modes using 0-based source-frame indexing.
 
 FFmpeg and mpv decode examples (replace `30000/1001` with your actual frame rate if needed):
 
