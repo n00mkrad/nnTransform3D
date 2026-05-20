@@ -683,8 +683,8 @@ bool resolveModelPath(const char* argv0, const std::string& modelPathArg, bool m
 }
 
 void printUsage(const char* exeName) {
-    std::cerr << "Usage: " << exeName << " [--input <path>] [--model <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]\n";
-    std::cerr << "Defaults: --out-mode tbc, --av-start 132, --av-end 896, --lines 480\n";
+    std::cerr << "Usage: " << exeName << " [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]\n";
+    std::cerr << "Defaults: --out-mode tbc, --gpu 0, --trt_mpi 1000, --trt_mss 1, --av-start 132, --av-end 896, --lines 480\n";
 }
 
 // --- Main program ---
@@ -712,6 +712,9 @@ int main(int argc, char** argv) {
     bool inputSpecified = false;
     std::string modelPathArg;
     bool modelSpecified = false;
+    int gpuId = 0;
+    int trtMaxPartitionIterations = 1000;
+    int trtMinSubgraphSize = 1;
     bool quietProgressLog = false;
 
     std::vector<std::string> positionalArgs;
@@ -737,6 +740,66 @@ int main(int argc, char** argv) {
             }
             modelPathArg = argv[++argIndex];
             modelSpecified = true;
+        }
+        else if (arg == "--gpu") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --gpu.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                gpuId = std::stoi(argv[++argIndex]);
+                if (gpuId < 0) {
+                    std::cerr << "[Error] --gpu must be a non-negative integer.\n";
+                    printUsage(argv[0]);
+                    return -1;
+                }
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --gpu value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--trt_mpi") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --trt_mpi.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                trtMaxPartitionIterations = std::stoi(argv[++argIndex]);
+                if (trtMaxPartitionIterations <= 0) {
+                    std::cerr << "[Error] --trt_mpi must be a positive integer.\n";
+                    printUsage(argv[0]);
+                    return -1;
+                }
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --trt_mpi value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--trt_mss") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --trt_mss.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                trtMinSubgraphSize = std::stoi(argv[++argIndex]);
+                if (trtMinSubgraphSize <= 0) {
+                    std::cerr << "[Error] --trt_mss must be a positive integer.\n";
+                    printUsage(argv[0]);
+                    return -1;
+                }
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --trt_mss value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
         }
         else if (arg == "--av-start") {
             if (!nextValueAvailable()) {
@@ -1143,6 +1206,9 @@ int main(int argc, char** argv) {
     // Initialize ONNX (with exception handling)
     log << "Initializing ONNX Runtime...\n";
     log << "Model Path: " << resolvedModelPath.string() << "\n";
+    log << "GPU Device: " << gpuId << "\n";
+    log << "TensorRT trt_max_partition_iterations: " << trtMaxPartitionIterations << "\n";
+    log << "TensorRT trt_min_subgraph_size: " << trtMinSubgraphSize << "\n";
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "nnTransform3D");
     Ort::SessionOptions session_options;
 
@@ -1150,7 +1216,9 @@ int main(int argc, char** argv) {
     try {
         // 1. Configure TensorRT
         OrtTensorRTProviderOptions trt_options{};
-        trt_options.device_id = 0;
+        trt_options.device_id = gpuId;
+        trt_options.trt_max_partition_iterations = trtMaxPartitionIterations;
+        trt_options.trt_min_subgraph_size = trtMinSubgraphSize;
 
         // Enable FP16, leverage Tensor Core for immense speedup
         trt_options.trt_fp16_enable = 1;
@@ -1167,7 +1235,7 @@ int main(int argc, char** argv) {
 
         // 2. Configure CUDA as fallback
         OrtCUDAProviderOptions cuda_options;
-        cuda_options.device_id = 0;
+        cuda_options.device_id = gpuId;
         cuda_options.arena_extend_strategy = 0;
         session_options.AppendExecutionProvider_CUDA(cuda_options);
         log << "CUDA Fallback Provider appended successfully." << std::endl;

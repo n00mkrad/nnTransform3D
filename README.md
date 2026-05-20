@@ -1,11 +1,12 @@
 ## nnTransform3D (CUDA 12 required)
 
-Usage:  
-`nnTransform3D.exe [--input <path>] [--model <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
+Basic Usage:  
+`nnTransform3D.exe [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--json <path>] [--full-frame] [--first-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
+
+Full Usage:  
+`nnTransform3D.exe [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
 
 Options:  
-`--input`: Input TBC file. Can also be passed without `--input`.  
-`--model`: ONNX model path. Default: `chroma_net.onnx` in the executable directory or working directory.  
 `--av-start`: Active video area start (in pixels, horizontal).  
 `--av-end`: Active video area end (in pixels, horizontal).  
 `--width`: Active video width. Used to derive `av-end` from `av-start` when `--av-end` is omitted.  
@@ -16,8 +17,16 @@ Options:
 `--full-frame`: For `raw_y`, `raw_yc`, and `y4m`, output full frame geometry including blanking regions.  
 `--first-line`: First output line for active-area output (default `40`).  
 `--last-line`: Last output line for active-area output (exclusive).  
-`--lines`: Active output height in lines. Used to derive `last-line` from `first-line` when `--last-line` is omitted. Default: `480`.
-`-q`: Disable the periodic progress message (`[Info] Processed n frames...`).
+`--lines`: Active output height in lines. Used to derive `last-line` from `first-line` when `--last-line` is omitted. Default: `480`.  
+`-q`: Disable the progress message (`[Info] Processed n frames...`).  
+
+Advanced:  
+`--input`: Input TBC file. Explicit/keyword form of positional `[input.tbc]`.
+`--model`: ONNX model path. Default: `chroma_net.onnx` in the executable directory or working directory.  
+`--gpu`: GPU index used for TensorRT and CUDA providers. Default: `0`.  
+`--trt_mpi`: TensorRT max partition iterations (`trt_max_partition_iterations`). Default: `1000`.  
+`--trt_mss`: TensorRT minimum subgraph size (`trt_min_subgraph_size`). Default: `1`.  
+
 
 ### Metadata and Active Video Area
 
