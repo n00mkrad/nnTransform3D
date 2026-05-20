@@ -167,11 +167,11 @@ Y4mNtscWriter::Y4mNtscWriter(const LdJsonMetadata& metadata_, const Y4mNtscConfi
     xEnd = frameWidth;
     yStart = 0;
     yEnd = frameHeight;
-    if (config.areaMode == Y4mAreaMode::Active) {
+    if (!config.fullFrame) {
         xStart = (config.activeVideoStartOverride >= 0) ? config.activeVideoStartOverride : metadata.videoParameters.activeVideoStart;
         xEnd = (config.activeVideoEndOverride >= 0) ? config.activeVideoEndOverride : metadata.videoParameters.activeVideoEnd;
-        yStart = config.firstActiveFrameLine;
-        yEnd = config.lastActiveFrameLine;
+        yStart = config.firstLine;
+        yEnd = config.lastLine;
     }
     if (xStart < 0 || xEnd > frameWidth || xStart >= xEnd) throw std::runtime_error("Invalid horizontal Y4M output range.");
     if (yStart < 0 || yEnd > frameHeight || yStart >= yEnd) throw std::runtime_error("Invalid vertical Y4M output range.");

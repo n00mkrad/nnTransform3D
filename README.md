@@ -1,35 +1,40 @@
 ## nnTransform3D (CUDA 12 required)
 
 Usage:  
-`nnTransform3D.exe [--input <path>] [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--input-metadata <path>] [--input-json <path>] [--y4m-area active|full] [--y4m-first-active-frame-line <num>] [--y4m-last-active-frame-line <num>] [--out <path|->] [input.tbc]`
+`nnTransform3D.exe [--input <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [--out <path|->] [input.tbc]`
 
 Options:  
 `--input`: Input TBC file. Can also be passed without `--input`.  
-`--av-start`: Active video area start (in pixels, horizontal)  
-`--av-end`: Active video area end (in pixels, horizontal) *(Note: `av-end` - `av-start` must be positive)*  
+`--av-start`: Active video area start (in pixels, horizontal).  
+`--av-end`: Active video area end (in pixels, horizontal).  
+`--width`: Active video width. Used to derive `av-end` from `av-start` when `--av-end` is omitted.  
 `--out-mode`: Output mode, either `tbc`, `raw_y`, `raw_yc`, or `y4m`. Default: `tbc`.  
 `--tbc-pipe-mode`: TBC stdout layout for `--out-mode tbc`: `y`, `c`, `yc_alt`, or `yc_stack`. Requires `--out -`.  
 `--out`: Output path, or `-` for binary stdout. In TBC mode, `--out -` is only valid when `--tbc-pipe-mode` is set.  
-`--input-metadata`: Metadata JSON path for Y4M mode.  
-`--input-json`: Legacy alias for `--input-metadata`.  
-`--y4m-area`: Y4M output area, `active` or `full`. Default: `active`.  
-`--y4m-first-active-frame-line`: First active frame line for Y4M active-area mode (default `40`).  
-`--y4m-last-active-frame-line`: Last active frame line for Y4M active-area mode (default `525`, exclusive).  
+`--json`: Metadata JSON path. If omitted, `<input>.json` is used if present.  
+`--full-frame`: For `raw_y`, `raw_yc`, and `y4m`, output full frame geometry including blanking regions.  
+`--first-line`: First output line for active-area output (default `40`).  
+`--last-line`: Last output line for active-area output (exclusive).  
+`--lines`: Active output height in lines. Used to derive `last-line` from `first-line` when `--last-line` is omitted. Default: `480`.
 
-### Active Video Area
+### Metadata and Active Video Area
 
-Can be read from your TBC.json or DB file (or GUIs like ld-analyse).
+Metadata is attempted in all output modes from `--json` or auto-detected `<input>.json`.  
+If metadata loads and `--av-start` / `--av-end` are not set, `activeVideoStart` / `activeVideoEnd` from JSON are used.  
+For `tbc`, `raw_y`, and `raw_yc`, missing/invalid metadata falls back to defaults (`132..896`) unless AV bounds are explicitly set.  
+For `y4m`, valid metadata is required.
 
-Hint: activeVideoEnd = activeVideoStart + activeVideoWidth
+Range derivation precedence:
+- `--av-end` overrides `--width`.
+- `--last-line` overrides `--lines`.
+- If `--last-line` is omitted, resolved vertical end is `last-line = first-line + lines` (default lines `480`).
 
 ### Y4M Output Mode
 
 - `--out-mode y4m` writes YUV4MPEG2 `YUV444P16` limited-range frames.
-- Uses metadata JSON from `--input-metadata` / `--input-json`, or auto-falls back to `<input>.json`.
 - Video is merged from separated luma and chroma using minimal `mono`/`ntsc1d` decoders. More advanced comb filters are not needed as Y/C is already cleanly separated.
-- `--y4m-area active` crops to active picture (`videoParameters.activeVideoStart/End` and configurable frame-line range).
-- `--y4m-area full` outputs full metadata frame geometry (`fieldWidth x ((fieldHeight * 2) - 1)`).
-- Explicit `--av-start/--av-end` can override metadata horizontal bounds in `active` area mode.
+- Default is active-area output, using horizontal metadata bounds (or AV overrides) and `--first-line` / `--last-line`.
+- `--full-frame` outputs full metadata geometry (`fieldWidth x ((fieldHeight * 2) - 1)`).
 - `--out -` is supported for piping Y4M to stdout.
 
 Examples:
@@ -38,11 +43,14 @@ Examples:
 # Default Y4M file output (auto metadata from input.tbc.json)
 nnTransform3D --input input.tbc --out-mode y4m
 
-# Explicit metadata file and active-area output to stdout
-nnTransform3D --input input.tbc --out-mode y4m --input-metadata tbc-example.json --y4m-area active --out - > output.y4m
+# Explicit metadata file and active-area output to stdout using first-line + lines
+nnTransform3D --input input.tbc --out-mode y4m --json tbc-example.json --first-line 40 --lines 480 --out - > output.y4m
+
+# Explicit metadata file using av-start + width shorthand (av-end derived)
+nnTransform3D --input input.tbc --out-mode y4m --json tbc-example.json --av-start 147 --width 758 --out output_active.y4m
 
 # Full-frame Y4M output
-nnTransform3D --input input.tbc --out-mode y4m --input-json tbc-example.json --y4m-area full --out output_full.y4m
+nnTransform3D --input input.tbc --out-mode y4m --json tbc-example.json --full-frame --out output_full.y4m
 ```
 
 ### Default TBC File Output
@@ -55,7 +63,7 @@ All TBC pipe modes emit headerless `uint16` little-endian samples and preserve c
 
 - `--tbc-pipe-mode y`: Emit only luma TBC frame chunks.
 - `--tbc-pipe-mode c`: Emit only chroma TBC frame chunks.
-- `--tbc-pipe-mode yc_alt`: Emit luma chunk then chroma chunk for each source frame. Interpret as `910x526` with doubled frame cadence. (6000/1001 FPS with alternating Y/C)
+- `--tbc-pipe-mode yc_alt`: Emit luma chunk then chroma chunk for each source frame. Interpret as `910x526` with doubled frame cadence. (60000/1001 FPS with alternating Y/C)
 - `--tbc-pipe-mode yc_stack`: Emit the same byte order as `yc_alt`, but interpret as vertically stacked `910x1052` frames (Y top, C bottom). This is intentionally out-of-spec TBC geometry.
 
 `yc_alt` and `yc_stack` produce identical bytes; only downstream interpretation differs.
@@ -64,35 +72,47 @@ Examples:
 
 ```bash
 # Y-only TBC stream to file
-nnTransform3D --input input.tbc --av-start 132 --av-end 896 --out-mode tbc --tbc-pipe-mode y --out - > input_Y.tbc
+nnTransform3D --input input.tbc --out-mode tbc --tbc-pipe-mode y --out - > input_Y.tbc
 
 # C-only TBC stream to file
-nnTransform3D --input input.tbc --av-start 132 --av-end 896 --out-mode tbc --tbc-pipe-mode c --out - > input_C.tbc
+nnTransform3D --input input.tbc --out-mode tbc --tbc-pipe-mode c --out - > input_C.tbc
 
 # YC alternating mode interpreted as 910x526 at 2x frame cadence
-nnTransform3D --input input.tbc --av-start 132 --av-end 896 --out-mode tbc --tbc-pipe-mode yc_alt --out - | ffmpeg -f rawvideo -pixel_format gray16le -video_size 910x526 -framerate 60000/1001 -i - -c:v ffv1 input_YC_alt.mkv
+nnTransform3D --input input.tbc --out-mode tbc --tbc-pipe-mode yc_alt --out - | ffmpeg -f rawvideo -pixel_format gray16le -video_size 910x526 -framerate 60000/1001 -i - -c:v ffv1 input_YC_alt.mkv
 
 # YC stacked interpretation (910x1052), split back into Y and C
-nnTransform3D --input input.tbc --av-start 132 --av-end 896 --out-mode tbc --tbc-pipe-mode yc_stack --out - | ffmpeg -f rawvideo -pixel_format gray16le -video_size 910x1052 -framerate 30000/1001 -i - -filter_complex "[0:v]split=2[yall][call];[yall]crop=910:526:0:0[y];[call]crop=910:526:0:526[c]" -map "[y]" -c:v ffv1 input_Y_from_stack.mkv -map "[c]" -c:v ffv1 input_C_from_stack.mkv
+nnTransform3D --input input.tbc --out-mode tbc --tbc-pipe-mode yc_stack --out - | ffmpeg -f rawvideo -pixel_format gray16le -video_size 910x1052 -framerate 30000/1001 -i - -filter_complex "[0:v]split=2[yall][call];[yall]crop=910:526:0:0[y];[call]crop=910:526:0:526[c]" -map "[y]" -c:v ffv1 input_Y_from_stack.mkv -map "[c]" -c:v ffv1 input_C_from_stack.mkv
 ```
 
 ### Raw Video Output Mode
 
-- `--out-mode raw_y` writes one luma stream (`uint16` little-endian), frame-raster order `910x526`.
-- `--out-mode raw_yc` writes luma and chroma into one stream (`uint16` LE) by stacking them vertically, resulting in `910x1052` frames (luma on top, chroma on bottom).
+- `--out-mode raw_y` writes one luma stream (`uint16` little-endian).
+- `--out-mode raw_yc` writes luma then chroma planes (`uint16` LE) for each frame.
+- Default raw output is active-area cropped:
+  - Horizontal: `[activeVideoStart, activeVideoEnd)` from metadata/defaults/AV overrides.
+  - Vertical: `[first-line, last-line)` where `last-line` defaults to `first-line + lines` (`40 + 480 = 520`) unless explicitly set.
+- `--av-end` overrides `--width`.
+- `--last-line` overrides `--lines`.
+- `--full-frame` keeps raw geometry at `910x526` (`raw_y`) or `910x1052` stacked (`raw_yc`).
 - Raw default names are `input_Y.raw` (`raw_y`) and `input_YC.raw` (`raw_yc`) unless `--out` is provided.
 - `--out -` can be used in raw mode to pipe the data directly into another process (e.g. ffmpeg) without writing to disk.
 
 FFmpeg and mpv decode examples (replace `30000/1001` with your actual frame rate if needed):
 
 ```bash
-# Decode raw luma output (input_Y.raw) to a lossless FFV1 MKV
+# Decode full-frame raw luma output (input_Y.raw) to a lossless FFV1 MKV
+nnTransform3D --input input.tbc --out-mode raw_y --full-frame
 ffmpeg -f rawvideo -pixel_format gray16le -video_size 910x526 -framerate 30000/1001 -i input_Y.raw -c:v ffv1 input_Y.mkv
 
-# Pipe to ffmpeg and decode combined YC raw output while splitting it into separate Y and C videos and encode as lossless FFV1 MKV
-nnTransform3D --input input.tbc --av-start 132 --av-end 896 --out-mode raw_yc --out - | ffmpeg -f rawvideo -pixel_format gray16le -video_size 910x1052 -framerate 30000/1001 -i - -filter_complex "[0:v]split=2[yall][call];[yall]crop=910:526:0:0[y];[call]crop=910:526:0:526[c]" -map "[y]" -c:v ffv1 input_Y_from_YC.mkv -map "[c]" -c:v ffv1 input_C_from_YC.mkv
+# Pipe to ffmpeg and decode full-frame YC raw output while splitting into separate Y and C videos
+nnTransform3D --input input.tbc --out-mode raw_yc --full-frame --out - | ffmpeg -f rawvideo -pixel_format gray16le -video_size 910x1052 -framerate 30000/1001 -i - -filter_complex "[0:v]split=2[yall][call];[yall]crop=910:526:0:0[y];[call]crop=910:526:0:526[c]" -map "[y]" -c:v ffv1 input_Y_from_YC.mkv -map "[c]" -c:v ffv1 input_C_from_YC.mkv
 
-# Pipe to mpv to preview luma output in real time
-nnTransform3D --input input.tbc --av-start 132 --av-end 896 --out-mode raw_y --out - | mpv --demuxer=rawvideo --demuxer-rawvideo-mp-format=gray16le --demuxer-rawvideo-w=910 --demuxer-rawvideo-h=526 --demuxer-rawvideo-fps=30000/1001 -
+# Pipe to mpv to preview full-frame luma output in real time
+nnTransform3D --input input.tbc --out-mode raw_y --full-frame --out - | mpv --demuxer=rawvideo --demuxer-rawvideo-mp-format=gray16le --demuxer-rawvideo-w=910 --demuxer-rawvideo-h=526 --demuxer-rawvideo-fps=30000/1001 -
 ```
 
+### Licensing Note For Y4M Integration
+
+The Y4M NTSC decoder path includes GPL-derived logic from `src_chroma_decoder`.
+Distributions that include this path must remain GPLv3-compatible.
+See `GPL_DERIVED_INTEGRATION_NOTICE.md` and `COPYING.GPL-3.0.txt`.

@@ -438,6 +438,9 @@ struct OutputState {
     std::ostream* rawStream = nullptr;
     std::ostream* tbcPipeStream = nullptr;
     std::unique_ptr<Y4mNtscWriter> y4mWriter;
+    bool fullFrame = false;
+    int firstLine = 40;
+    int lastLine = 525;
 };
 
 const char* tbcPipeModeToString(TbcPipeMode mode) {
@@ -462,6 +465,14 @@ void packFramePlaneToTbcFields(const std::vector<uint16_t>& framePlane, std::vec
 void writeTbcFrameChunk(std::ostream& os, const std::vector<uint16_t>& field0, const std::vector<uint16_t>& field1) {
     os.write(reinterpret_cast<const char*>(field0.data()), static_cast<std::streamsize>(field0.size() * sizeof(uint16_t)));
     os.write(reinterpret_cast<const char*>(field1.data()), static_cast<std::streamsize>(field1.size() * sizeof(uint16_t)));
+}
+
+void writeCroppedRawPlane(std::ostream& os, const std::vector<uint16_t>& plane, int xStart, int xEnd, int yStart, int yEnd) {
+    const int outputWidth = xEnd - xStart;
+    for (int y = yStart; y < yEnd; ++y) {
+        const uint16_t* rowPtr = &plane[y * FRAME_WIDTH + xStart];
+        os.write(reinterpret_cast<const char*>(rowPtr), static_cast<std::streamsize>(outputWidth * sizeof(uint16_t)));
+    }
 }
 
 void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int activeStartX, int activeEndX) {
@@ -539,9 +550,25 @@ void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int ac
         throw std::runtime_error("Raw output stream is not initialized.");
     }
 
-    outputState.rawStream->write(reinterpret_cast<const char*>(lumaOut.data()), static_cast<std::streamsize>(lumaOut.size() * sizeof(uint16_t)));
-    if (outputState.mode == OutputMode::RawYc) {
-        outputState.rawStream->write(reinterpret_cast<const char*>(chromaOut.data()), static_cast<std::streamsize>(chromaOut.size() * sizeof(uint16_t)));
+    const int outputXStart = outputState.fullFrame ? 0 : activeStartX;
+    const int outputXEnd = outputState.fullFrame ? FRAME_WIDTH : activeEndX;
+    const int outputYStart = outputState.fullFrame ? 0 : outputState.firstLine;
+    const int outputYEnd = outputState.fullFrame ? FRAME_HEIGHT : outputState.lastLine;
+
+    if (outputXStart < 0 || outputXEnd > FRAME_WIDTH || outputXStart >= outputXEnd || outputYStart < 0 || outputYEnd > FRAME_HEIGHT || outputYStart >= outputYEnd) {
+        throw std::runtime_error("Invalid raw output crop range.");
+    }
+
+    if (outputState.fullFrame) {
+        outputState.rawStream->write(reinterpret_cast<const char*>(lumaOut.data()), static_cast<std::streamsize>(lumaOut.size() * sizeof(uint16_t)));
+        if (outputState.mode == OutputMode::RawYc) {
+            outputState.rawStream->write(reinterpret_cast<const char*>(chromaOut.data()), static_cast<std::streamsize>(chromaOut.size() * sizeof(uint16_t)));
+        }
+    } else {
+        writeCroppedRawPlane(*outputState.rawStream, lumaOut, outputXStart, outputXEnd, outputYStart, outputYEnd);
+        if (outputState.mode == OutputMode::RawYc) {
+            writeCroppedRawPlane(*outputState.rawStream, chromaOut, outputXStart, outputXEnd, outputYStart, outputYEnd);
+        }
     }
     if (!(*outputState.rawStream)) {
         throw std::runtime_error("Failed while writing raw output stream.");
@@ -549,8 +576,8 @@ void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int ac
 }
 
 void printUsage(const char* exeName) {
-    std::cerr << "Usage: " << exeName << " [--input <path>] [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--input-metadata <path>] [--input-json <path>] [--y4m-area active|full] [--y4m-first-active-frame-line <num>] [--y4m-last-active-frame-line <num>] [--out <path|->] [input.tbc]\n";
-    std::cerr << "Defaults: --out-mode tbc, --av-start 132, --av-end 896\n";
+    std::cerr << "Usage: " << exeName << " [--input <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [--out <path|->] [input.tbc]\n";
+    std::cerr << "Defaults: --out-mode tbc, --av-start 132, --av-end 896, --lines 480\n";
 }
 
 // --- Main program ---
@@ -562,15 +589,17 @@ int main(int argc, char** argv) {
     std::string inFile = "input.tbc"; // Default processing if no parameters are passed
     OutputMode outputMode = OutputMode::Tbc;
     TbcPipeMode tbcPipeMode = TbcPipeMode::None;
-    Y4mAreaMode y4mAreaMode = Y4mAreaMode::Active;
-    int y4mFirstActiveFrameLine = 40;
-    int y4mLastActiveFrameLine = 525;
-    bool y4mAreaSpecified = false;
-    bool y4mFirstLineSpecified = false;
-    bool y4mLastLineSpecified = false;
-    std::string inputMetadataPath;
-    bool inputMetadataSpecified = false;
-    bool inputJsonSpecified = false;
+    bool fullFrame = false;
+    int firstLine = 40;
+    int lastLine = 525;
+    int lines = 480;
+    int width = 0;
+    bool firstLineSpecified = false;
+    bool lastLineSpecified = false;
+    bool linesSpecified = false;
+    bool widthSpecified = false;
+    std::string jsonPath;
+    bool jsonSpecified = false;
     std::string outPath;
     bool outPathSpecified = false;
     bool inputSpecified = false;
@@ -622,6 +651,27 @@ int main(int argc, char** argv) {
                 return -1;
             }
         }
+        else if (arg == "--width") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --width.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                width = std::stoi(argv[++argIndex]);
+                widthSpecified = true;
+                if (width <= 0) {
+                    std::cerr << "[Error] --width must be a positive integer.\n";
+                    printUsage(argv[0]);
+                    return -1;
+                }
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --width value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
         else if (arg == "--out-mode") {
             if (!nextValueAvailable()) {
                 std::cerr << "[Error] Missing value after --out-mode.\n";
@@ -665,68 +715,67 @@ int main(int argc, char** argv) {
             outPathSpecified = true;
             outPath = argv[++argIndex];
         }
-        else if (arg == "--input-metadata") {
+        else if (arg == "--json") {
             if (!nextValueAvailable()) {
-                std::cerr << "[Error] Missing value after --input-metadata.\n";
+                std::cerr << "[Error] Missing value after --json.\n";
                 printUsage(argv[0]);
                 return -1;
             }
-            inputMetadataPath = argv[++argIndex];
-            inputMetadataSpecified = true;
+            jsonPath = argv[++argIndex];
+            jsonSpecified = true;
         }
-        else if (arg == "--input-json") {
-            if (!nextValueAvailable()) {
-                std::cerr << "[Error] Missing value after --input-json.\n";
-                printUsage(argv[0]);
-                return -1;
-            }
-            inputMetadataPath = argv[++argIndex];
-            inputJsonSpecified = true;
+        else if (arg == "--full-frame") {
+            fullFrame = true;
         }
-        else if (arg == "--y4m-area") {
+        else if (arg == "--first-line") {
             if (!nextValueAvailable()) {
-                std::cerr << "[Error] Missing value after --y4m-area.\n";
-                printUsage(argv[0]);
-                return -1;
-            }
-            std::string value = argv[++argIndex];
-            if (value == "active") y4mAreaMode = Y4mAreaMode::Active;
-            else if (value == "full") y4mAreaMode = Y4mAreaMode::Full;
-            else {
-                std::cerr << "[Error] Unknown --y4m-area value: " << value << "\n";
-                printUsage(argv[0]);
-                return -1;
-            }
-            y4mAreaSpecified = true;
-        }
-        else if (arg == "--y4m-first-active-frame-line") {
-            if (!nextValueAvailable()) {
-                std::cerr << "[Error] Missing value after --y4m-first-active-frame-line.\n";
+                std::cerr << "[Error] Missing value after --first-line.\n";
                 printUsage(argv[0]);
                 return -1;
             }
             try {
-                y4mFirstActiveFrameLine = std::stoi(argv[++argIndex]);
-                y4mFirstLineSpecified = true;
+                firstLine = std::stoi(argv[++argIndex]);
+                firstLineSpecified = true;
             }
             catch (const std::exception& e) {
-                std::cerr << "[Error] Invalid --y4m-first-active-frame-line value: " << e.what() << "\n";
+                std::cerr << "[Error] Invalid --first-line value: " << e.what() << "\n";
                 printUsage(argv[0]);
                 return -1;
             }
         }
-        else if (arg == "--y4m-last-active-frame-line") {
+        else if (arg == "--last-line") {
             if (!nextValueAvailable()) {
-                std::cerr << "[Error] Missing value after --y4m-last-active-frame-line.\n";
+                std::cerr << "[Error] Missing value after --last-line.\n";
                 printUsage(argv[0]);
                 return -1;
             }
             try {
-                y4mLastActiveFrameLine = std::stoi(argv[++argIndex]);
-                y4mLastLineSpecified = true;
+                lastLine = std::stoi(argv[++argIndex]);
+                lastLineSpecified = true;
             }
             catch (const std::exception& e) {
-                std::cerr << "[Error] Invalid --y4m-last-active-frame-line value: " << e.what() << "\n";
+                std::cerr << "[Error] Invalid --last-line value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--lines") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --lines.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                lines = std::stoi(argv[++argIndex]);
+                linesSpecified = true;
+                if (lines <= 0) {
+                    std::cerr << "[Error] --lines must be a positive integer.\n";
+                    printUsage(argv[0]);
+                    return -1;
+                }
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --lines value: " << e.what() << "\n";
                 printUsage(argv[0]);
                 return -1;
             }
@@ -753,23 +802,13 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    LdJsonMetadata y4mMetadata;
-    std::string y4mMetadataPathResolved;
-    bool y4mMetadataLoaded = false;
+    LdJsonMetadata metadata;
+    std::string metadataPathResolved;
+    std::string metadataError;
+    bool metadataLoaded = false;
 
-    if (inputMetadataSpecified && inputJsonSpecified) {
-        std::cerr << "[Error] Specify only one of --input-metadata or --input-json.\n";
-        printUsage(argv[0]);
-        return -1;
-    }
-
-    if (outputMode != OutputMode::Y4m && (y4mAreaSpecified || y4mFirstLineSpecified || y4mLastLineSpecified)) {
-        std::cerr << "[Error] --y4m-area and --y4m-*-active-frame-line options are only valid with --out-mode y4m.\n";
-        printUsage(argv[0]);
-        return -1;
-    }
-    if (outputMode != OutputMode::Y4m && (inputMetadataSpecified || inputJsonSpecified)) {
-        std::cerr << "[Error] --input-metadata/--input-json are only valid with --out-mode y4m.\n";
+    if (outputMode == OutputMode::Tbc && (fullFrame || firstLineSpecified || lastLineSpecified || linesSpecified)) {
+        std::cerr << "[Error] --full-frame, --first-line, --last-line, and --lines are not valid with --out-mode tbc.\n";
         printUsage(argv[0]);
         return -1;
     }
@@ -794,20 +833,45 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    if (outputMode == OutputMode::Y4m) {
-        y4mMetadataPathResolved = (inputMetadataSpecified || inputJsonSpecified) ? inputMetadataPath : (inFile + ".json");
-        std::string metadataError;
-        if (!loadLdJsonMetadata(y4mMetadataPathResolved, y4mMetadata, metadataError)) {
-            std::cerr << "[Error] " << metadataError << "\n";
+    metadataPathResolved = jsonSpecified ? jsonPath : (inFile + ".json");
+    if (loadLdJsonMetadata(metadataPathResolved, metadata, metadataError)) {
+        metadataLoaded = true;
+        if (!avStartSpecified) activeVideoStart = metadata.videoParameters.activeVideoStart;
+        if (!avEndSpecified) activeVideoEnd = metadata.videoParameters.activeVideoEnd;
+    } else if (outputMode == OutputMode::Y4m) {
+        std::cerr << "[Error] " << metadataError << "\n";
+        return -1;
+    }
+
+    if (!fullFrame && !lastLineSpecified) {
+        long long derivedLastLine = static_cast<long long>(firstLine) + static_cast<long long>(lines);
+        if (derivedLastLine > 2147483647LL) {
+            std::cerr << "[Error] Derived --last-line exceeds supported integer range.\n";
             return -1;
         }
-        y4mMetadataLoaded = true;
-        if (!avStartSpecified) activeVideoStart = y4mMetadata.videoParameters.activeVideoStart;
-        if (!avEndSpecified) activeVideoEnd = y4mMetadata.videoParameters.activeVideoEnd;
-        if (activeVideoStart >= activeVideoEnd) {
-            std::cerr << "[Error] Invalid active horizontal range after metadata/CLI merge.\n";
+        lastLine = static_cast<int>(derivedLastLine);
+    }
+    if (!avEndSpecified && widthSpecified) {
+        long long derivedActiveVideoEnd = static_cast<long long>(activeVideoStart) + static_cast<long long>(width);
+        if (derivedActiveVideoEnd > 2147483647LL) {
+            std::cerr << "[Error] Derived --av-end exceeds supported integer range.\n";
             return -1;
         }
+        activeVideoEnd = static_cast<int>(derivedActiveVideoEnd);
+    }
+
+    if (activeVideoStart >= activeVideoEnd) {
+        std::cerr << "[Error] Invalid active horizontal range after metadata/CLI merge.\n";
+        return -1;
+    }
+    if (activeVideoStart < 0 || activeVideoEnd > FRAME_WIDTH) {
+        std::cerr << "[Error] Active horizontal range is out of bounds. Valid range is [0, " << FRAME_WIDTH << "].\n";
+        return -1;
+    }
+    if (outputMode != OutputMode::Tbc && !fullFrame && (firstLine < 0 || lastLine > FRAME_HEIGHT || firstLine >= lastLine)) {
+        std::cerr << "[Error] Resolved vertical range must satisfy 0 <= first-line < last-line <= " << FRAME_HEIGHT << ".\n";
+        printUsage(argv[0]);
+        return -1;
     }
 
     std::string baseName = inFile.substr(0, inFile.find_last_of('.'));
@@ -832,6 +896,10 @@ int main(int argc, char** argv) {
 #endif
 
     log << "Target Input File: " << inFile << "\n";
+    log << "Metadata Input: " << metadataPathResolved << (metadataLoaded ? " (loaded)\n" : " (not loaded, using defaults)\n");
+    if (!metadataLoaded && !metadataError.empty()) {
+        log << "Metadata Load Note: " << metadataError << "\n";
+    }
     if (outputMode == OutputMode::Tbc) {
         if (writeTbcPipeToStdout) {
             log << "Output Mode: TBC_PIPE_" << tbcPipeModeToString(tbcPipeMode) << "\n";
@@ -844,22 +912,31 @@ int main(int argc, char** argv) {
             log << "Chroma Output: " << chromaFile << "\n";
         }
     } else if (outputMode == OutputMode::Y4m) {
-        if (!y4mMetadataLoaded) {
+        if (!metadataLoaded) {
             std::cerr << "[Error] Y4M metadata is not initialized.\n";
             return -1;
         }
         log << "Output Mode: Y4M\n";
         log << "Y4M Output: " << (writeY4mToStdout ? "stdout (-)" : outPath) << "\n";
-        log << "Metadata Input: " << y4mMetadataPathResolved << "\n";
-        log << "Y4M Area: " << ((y4mAreaMode == Y4mAreaMode::Active) ? "active" : "full") << "\n";
-        if (y4mAreaMode == Y4mAreaMode::Active) {
-            log << "Y4M First Active Frame Line: " << y4mFirstActiveFrameLine << "\n";
-            log << "Y4M Last Active Frame Line: " << y4mLastActiveFrameLine << "\n";
+        log << "Frame Area: " << (fullFrame ? "full" : "active") << "\n";
+        if (!fullFrame) {
+            log << "First Line: " << firstLine << "\n";
+            log << "Last Line: " << lastLine << "\n";
+            log << "Lines: " << (lastLine - firstLine) << "\n";
             log << "Y4M Horizontal Active Range: [" << activeVideoStart << ", " << activeVideoEnd << ")\n";
+            log << "Width: " << (activeVideoEnd - activeVideoStart) << "\n";
         }
     } else {
         log << "Output Mode: " << ((outputMode == OutputMode::RawY) ? "RAW_Y" : "RAW_YC") << "\n";
         log << "Raw Output: " << (writeRawToStdout ? "stdout (-)" : outPath) << "\n";
+        log << "Frame Area: " << (fullFrame ? "full" : "active") << "\n";
+        if (!fullFrame) {
+            log << "First Line: " << firstLine << "\n";
+            log << "Last Line: " << lastLine << "\n";
+            log << "Lines: " << (lastLine - firstLine) << "\n";
+            log << "Raw Horizontal Active Range: [" << activeVideoStart << ", " << activeVideoEnd << ")\n";
+            log << "Width: " << (activeVideoEnd - activeVideoStart) << "\n";
+        }
     }
 
     std::ifstream is(inFile, std::ios::binary);
@@ -884,6 +961,9 @@ int main(int argc, char** argv) {
     OutputState outputState;
     outputState.mode = outputMode;
     outputState.tbcPipeMode = tbcPipeMode;
+    outputState.fullFrame = fullFrame;
+    outputState.firstLine = firstLine;
+    outputState.lastLine = lastLine;
     if (outputMode == OutputMode::Tbc) {
         if (writeTbcPipeToStdout) {
             outputState.tbcPipeStream = &std::cout;
@@ -909,12 +989,12 @@ int main(int argc, char** argv) {
         }
         try {
             Y4mNtscConfig y4mConfig;
-            y4mConfig.areaMode = y4mAreaMode;
-            y4mConfig.activeVideoStartOverride = (y4mAreaMode == Y4mAreaMode::Active) ? activeVideoStart : -1;
-            y4mConfig.activeVideoEndOverride = (y4mAreaMode == Y4mAreaMode::Active) ? activeVideoEnd : -1;
-            y4mConfig.firstActiveFrameLine = y4mFirstActiveFrameLine;
-            y4mConfig.lastActiveFrameLine = y4mLastActiveFrameLine;
-            outputState.y4mWriter = std::make_unique<Y4mNtscWriter>(y4mMetadata, y4mConfig, *y4mStream);
+            y4mConfig.fullFrame = fullFrame;
+            y4mConfig.activeVideoStartOverride = fullFrame ? -1 : activeVideoStart;
+            y4mConfig.activeVideoEndOverride = fullFrame ? -1 : activeVideoEnd;
+            y4mConfig.firstLine = firstLine;
+            y4mConfig.lastLine = lastLine;
+            outputState.y4mWriter = std::make_unique<Y4mNtscWriter>(metadata, y4mConfig, *y4mStream);
         }
         catch (const std::exception& e) {
             std::cerr << "[Error] Failed to initialize Y4M writer: " << e.what() << "\n";

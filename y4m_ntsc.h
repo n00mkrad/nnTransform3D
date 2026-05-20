@@ -30,17 +30,12 @@ struct LdJsonMetadata {
     std::vector<LdJsonFieldMeta> fields;
 };
 
-enum class Y4mAreaMode {
-    Active,
-    Full
-};
-
 struct Y4mNtscConfig {
-    Y4mAreaMode areaMode = Y4mAreaMode::Active;
+    bool fullFrame = false;
     int activeVideoStartOverride = -1;
     int activeVideoEndOverride = -1;
-    int firstActiveFrameLine = 40;
-    int lastActiveFrameLine = 525;
+    int firstLine = 40;
+    int lastLine = 525;
 };
 
 bool loadLdJsonMetadata(const std::string& path, LdJsonMetadata& metadata, std::string& error);
