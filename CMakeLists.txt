@@ -18,7 +18,10 @@ else()
     set(ONNXRUNTIME_LIB "${ONNXRUNTIME_DIR}/lib/libonnxruntime.so")
 endif()
 
-add_executable(nnTransform3D main.cu)
+add_executable(nnTransform3D
+    main.cu
+    y4m_ntsc.cpp
+)
 
 target_link_libraries(nnTransform3D PRIVATE
     cufft

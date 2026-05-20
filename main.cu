@@ -16,6 +16,8 @@
 #include <cuda_runtime.h>
 #include <onnxruntime_cxx_api.h>
 
+#include "y4m_ntsc.h"
+
 
 // This is a kernel function running on the GPU   (这是一个运行在 GPU 上的核函数)
 __global__ void applyMaskKernel(cufftDoubleComplex* d_out_batch, const float* d_mask, int total_elements) {
@@ -414,20 +416,52 @@ void processSplit3D(FrameBuffer& f0, FrameBuffer& f1, Ort::Session& session, int
 enum class OutputMode {
     Tbc,
     RawY,
-    RawYc
+    RawYc,
+    Y4m
+};
+
+enum class TbcPipeMode {
+    None,
+    Y,
+    C,
+    YcAlt,
+    YcStack
 };
 
 struct OutputState {
     OutputMode mode = OutputMode::Tbc;
+    TbcPipeMode tbcPipeMode = TbcPipeMode::None;
     std::ofstream osLuma;
     std::ofstream osChroma;
     std::ofstream osRaw;
+    std::ofstream osY4m;
     std::ostream* rawStream = nullptr;
+    std::ostream* tbcPipeStream = nullptr;
+    std::unique_ptr<Y4mNtscWriter> y4mWriter;
 };
 
-void printUsage(const char* exeName) {
-    std::cerr << "Usage: " << exeName << " [--input <path>] [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc] [--out <path|->] [input.tbc]\n";
-    std::cerr << "Defaults: --out-mode tbc, --av-start 132, --av-end 896\n";
+const char* tbcPipeModeToString(TbcPipeMode mode) {
+    if (mode == TbcPipeMode::Y) return "Y";
+    if (mode == TbcPipeMode::C) return "C";
+    if (mode == TbcPipeMode::YcAlt) return "YC_ALT";
+    if (mode == TbcPipeMode::YcStack) return "YC_STACK";
+    return "NONE";
+}
+
+void packFramePlaneToTbcFields(const std::vector<uint16_t>& framePlane, std::vector<uint16_t>& field0Out, std::vector<uint16_t>& field1Out) {
+    field0Out.assign(FIELD_WIDTH * FIELD_HEIGHT, 0);
+    field1Out.assign(FIELD_WIDTH * FIELD_HEIGHT, 0);
+    for (int y = 0; y < FIELD_HEIGHT; ++y) {
+        int frameY0 = y * 2;
+        int frameY1 = frameY0 + 1;
+        if (frameY0 < FRAME_HEIGHT) std::copy(&framePlane[frameY0 * FRAME_WIDTH], &framePlane[(frameY0 + 1) * FRAME_WIDTH], &field0Out[y * FIELD_WIDTH]);
+        if (frameY1 < FRAME_HEIGHT) std::copy(&framePlane[frameY1 * FRAME_WIDTH], &framePlane[(frameY1 + 1) * FRAME_WIDTH], &field1Out[y * FIELD_WIDTH]);
+    }
+}
+
+void writeTbcFrameChunk(std::ostream& os, const std::vector<uint16_t>& field0, const std::vector<uint16_t>& field1) {
+    os.write(reinterpret_cast<const char*>(field0.data()), static_cast<std::streamsize>(field0.size() * sizeof(uint16_t)));
+    os.write(reinterpret_cast<const char*>(field1.data()), static_cast<std::streamsize>(field1.size() * sizeof(uint16_t)));
 }
 
 void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int activeStartX, int activeEndX) {
@@ -461,21 +495,43 @@ void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int ac
     }
 
     if (outputState.mode == OutputMode::Tbc) {
-        // Split the Frame back into two Fields for writing, to maintain TBC compatibility
-        for (int field = 0; field < 2; ++field) {
-            std::vector<uint16_t> fieldLuma(FIELD_WIDTH * FIELD_HEIGHT);
-            std::vector<uint16_t> fieldChroma(FIELD_WIDTH * FIELD_HEIGHT);
+        std::vector<uint16_t> lumaField0, lumaField1, chromaField0, chromaField1;
+        packFramePlaneToTbcFields(lumaOut, lumaField0, lumaField1);
+        packFramePlaneToTbcFields(chromaOut, chromaField0, chromaField1);
 
-            for (int y = 0; y < FIELD_HEIGHT; ++y) {
-                int frameY = y * 2 + field;
-                if (frameY < FRAME_HEIGHT) {
-                    std::copy(&lumaOut[frameY * FRAME_WIDTH], &lumaOut[(frameY + 1) * FRAME_WIDTH], &fieldLuma[y * FIELD_WIDTH]);
-                    std::copy(&chromaOut[frameY * FRAME_WIDTH], &chromaOut[(frameY + 1) * FRAME_WIDTH], &fieldChroma[y * FIELD_WIDTH]);
-                }
-            }
-            outputState.osLuma.write(reinterpret_cast<char*>(fieldLuma.data()), fieldLuma.size() * sizeof(uint16_t));
-            outputState.osChroma.write(reinterpret_cast<char*>(fieldChroma.data()), fieldChroma.size() * sizeof(uint16_t));
+        if (outputState.tbcPipeMode == TbcPipeMode::None) {
+            writeTbcFrameChunk(outputState.osLuma, lumaField0, lumaField1);
+            writeTbcFrameChunk(outputState.osChroma, chromaField0, chromaField1);
+            if (!outputState.osLuma || !outputState.osChroma) throw std::runtime_error("Failed while writing TBC output files.");
+            return;
         }
+
+        if (!outputState.tbcPipeStream) {
+            throw std::runtime_error("TBC pipe output stream is not initialized.");
+        }
+
+        if (outputState.tbcPipeMode == TbcPipeMode::Y) {
+            writeTbcFrameChunk(*outputState.tbcPipeStream, lumaField0, lumaField1);
+        }
+        else if (outputState.tbcPipeMode == TbcPipeMode::C) {
+            writeTbcFrameChunk(*outputState.tbcPipeStream, chromaField0, chromaField1);
+        }
+        else {
+            writeTbcFrameChunk(*outputState.tbcPipeStream, lumaField0, lumaField1);
+            writeTbcFrameChunk(*outputState.tbcPipeStream, chromaField0, chromaField1);
+        }
+
+        if (!(*outputState.tbcPipeStream)) {
+            throw std::runtime_error("Failed while writing TBC pipe output stream.");
+        }
+        return;
+    }
+
+    if (outputState.mode == OutputMode::Y4m) {
+        if (!outputState.y4mWriter) {
+            throw std::runtime_error("Y4M output writer is not initialized.");
+        }
+        outputState.y4mWriter->writeFrame(lumaOut, chromaOut);
         return;
     }
 
@@ -492,14 +548,31 @@ void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int ac
     }
 }
 
+void printUsage(const char* exeName) {
+    std::cerr << "Usage: " << exeName << " [--input <path>] [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--input-metadata <path>] [--input-json <path>] [--y4m-area active|full] [--y4m-first-active-frame-line <num>] [--y4m-last-active-frame-line <num>] [--out <path|->] [input.tbc]\n";
+    std::cerr << "Defaults: --out-mode tbc, --av-start 132, --av-end 896\n";
+}
+
 // --- Main program ---
 int main(int argc, char** argv) {
     int activeVideoStart = 132;
     int activeVideoEnd = 896;
+    bool avStartSpecified = false;
+    bool avEndSpecified = false;
     std::string inFile = "input.tbc"; // Default processing if no parameters are passed
     OutputMode outputMode = OutputMode::Tbc;
-    std::string rawOutPath;
-    bool rawOutputPathSpecified = false;
+    TbcPipeMode tbcPipeMode = TbcPipeMode::None;
+    Y4mAreaMode y4mAreaMode = Y4mAreaMode::Active;
+    int y4mFirstActiveFrameLine = 40;
+    int y4mLastActiveFrameLine = 525;
+    bool y4mAreaSpecified = false;
+    bool y4mFirstLineSpecified = false;
+    bool y4mLastLineSpecified = false;
+    std::string inputMetadataPath;
+    bool inputMetadataSpecified = false;
+    bool inputJsonSpecified = false;
+    std::string outPath;
+    bool outPathSpecified = false;
     bool inputSpecified = false;
 
     std::vector<std::string> positionalArgs;
@@ -525,6 +598,7 @@ int main(int argc, char** argv) {
             }
             try {
                 activeVideoStart = std::stoi(argv[++argIndex]);
+                avStartSpecified = true;
             }
             catch (const std::exception& e) {
                 std::cerr << "[Error] Invalid --av-start value: " << e.what() << "\n";
@@ -540,6 +614,7 @@ int main(int argc, char** argv) {
             }
             try {
                 activeVideoEnd = std::stoi(argv[++argIndex]);
+                avEndSpecified = true;
             }
             catch (const std::exception& e) {
                 std::cerr << "[Error] Invalid --av-end value: " << e.what() << "\n";
@@ -557,8 +632,26 @@ int main(int argc, char** argv) {
             if (value == "tbc") outputMode = OutputMode::Tbc;
             else if (value == "raw_y") outputMode = OutputMode::RawY;
             else if (value == "raw_yc") outputMode = OutputMode::RawYc;
+            else if (value == "y4m") outputMode = OutputMode::Y4m;
             else {
                 std::cerr << "[Error] Unknown --out-mode value: " << value << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--tbc-pipe-mode") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --tbc-pipe-mode.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            std::string value = argv[++argIndex];
+            if (value == "y") tbcPipeMode = TbcPipeMode::Y;
+            else if (value == "c") tbcPipeMode = TbcPipeMode::C;
+            else if (value == "yc_alt") tbcPipeMode = TbcPipeMode::YcAlt;
+            else if (value == "yc_stack") tbcPipeMode = TbcPipeMode::YcStack;
+            else {
+                std::cerr << "[Error] Unknown --tbc-pipe-mode value: " << value << "\n";
                 printUsage(argv[0]);
                 return -1;
             }
@@ -569,8 +662,74 @@ int main(int argc, char** argv) {
                 printUsage(argv[0]);
                 return -1;
             }
-            rawOutputPathSpecified = true;
-            rawOutPath = argv[++argIndex];
+            outPathSpecified = true;
+            outPath = argv[++argIndex];
+        }
+        else if (arg == "--input-metadata") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --input-metadata.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            inputMetadataPath = argv[++argIndex];
+            inputMetadataSpecified = true;
+        }
+        else if (arg == "--input-json") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --input-json.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            inputMetadataPath = argv[++argIndex];
+            inputJsonSpecified = true;
+        }
+        else if (arg == "--y4m-area") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --y4m-area.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            std::string value = argv[++argIndex];
+            if (value == "active") y4mAreaMode = Y4mAreaMode::Active;
+            else if (value == "full") y4mAreaMode = Y4mAreaMode::Full;
+            else {
+                std::cerr << "[Error] Unknown --y4m-area value: " << value << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            y4mAreaSpecified = true;
+        }
+        else if (arg == "--y4m-first-active-frame-line") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --y4m-first-active-frame-line.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                y4mFirstActiveFrameLine = std::stoi(argv[++argIndex]);
+                y4mFirstLineSpecified = true;
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --y4m-first-active-frame-line value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--y4m-last-active-frame-line") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --y4m-last-active-frame-line.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                y4mLastActiveFrameLine = std::stoi(argv[++argIndex]);
+                y4mLastLineSpecified = true;
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --y4m-last-active-frame-line value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
         }
         else if (arg.rfind("--", 0) == 0) {
             std::cerr << "[Error] Unknown option: " << arg << "\n";
@@ -594,36 +753,113 @@ int main(int argc, char** argv) {
         return -1;
     }
 
-    if (outputMode == OutputMode::Tbc && rawOutputPathSpecified) {
-        if (rawOutPath == "-") std::cerr << "[Error] --out - is not allowed in TBC mode because TBC writes two separate files.\n";
-        else std::cerr << "[Error] --out is only valid when --out-mode is raw_y or raw_yc.\n";
+    LdJsonMetadata y4mMetadata;
+    std::string y4mMetadataPathResolved;
+    bool y4mMetadataLoaded = false;
+
+    if (inputMetadataSpecified && inputJsonSpecified) {
+        std::cerr << "[Error] Specify only one of --input-metadata or --input-json.\n";
         printUsage(argv[0]);
         return -1;
+    }
+
+    if (outputMode != OutputMode::Y4m && (y4mAreaSpecified || y4mFirstLineSpecified || y4mLastLineSpecified)) {
+        std::cerr << "[Error] --y4m-area and --y4m-*-active-frame-line options are only valid with --out-mode y4m.\n";
+        printUsage(argv[0]);
+        return -1;
+    }
+    if (outputMode != OutputMode::Y4m && (inputMetadataSpecified || inputJsonSpecified)) {
+        std::cerr << "[Error] --input-metadata/--input-json are only valid with --out-mode y4m.\n";
+        printUsage(argv[0]);
+        return -1;
+    }
+
+    if (tbcPipeMode != TbcPipeMode::None) {
+        if (outputMode != OutputMode::Tbc) {
+            std::cerr << "[Error] --tbc-pipe-mode can only be used with --out-mode tbc.\n";
+            printUsage(argv[0]);
+            return -1;
+        }
+        if (!outPathSpecified || outPath != "-") {
+            std::cerr << "[Error] --tbc-pipe-mode requires --out -.\n";
+            printUsage(argv[0]);
+            return -1;
+        }
+    }
+
+    if (outputMode == OutputMode::Tbc && tbcPipeMode == TbcPipeMode::None && outPathSpecified) {
+        if (outPath == "-") std::cerr << "[Error] --out - requires --tbc-pipe-mode when --out-mode is tbc.\n";
+        else std::cerr << "[Error] --out is only valid for raw modes, or for TBC piping with --tbc-pipe-mode and --out -.\n";
+        printUsage(argv[0]);
+        return -1;
+    }
+
+    if (outputMode == OutputMode::Y4m) {
+        y4mMetadataPathResolved = (inputMetadataSpecified || inputJsonSpecified) ? inputMetadataPath : (inFile + ".json");
+        std::string metadataError;
+        if (!loadLdJsonMetadata(y4mMetadataPathResolved, y4mMetadata, metadataError)) {
+            std::cerr << "[Error] " << metadataError << "\n";
+            return -1;
+        }
+        y4mMetadataLoaded = true;
+        if (!avStartSpecified) activeVideoStart = y4mMetadata.videoParameters.activeVideoStart;
+        if (!avEndSpecified) activeVideoEnd = y4mMetadata.videoParameters.activeVideoEnd;
+        if (activeVideoStart >= activeVideoEnd) {
+            std::cerr << "[Error] Invalid active horizontal range after metadata/CLI merge.\n";
+            return -1;
+        }
     }
 
     std::string baseName = inFile.substr(0, inFile.find_last_of('.'));
     std::string lumaFile = baseName + "_Y.tbc";
     std::string chromaFile = baseName + "_C.tbc";
-    if (outputMode != OutputMode::Tbc && !rawOutputPathSpecified) rawOutPath = (outputMode == OutputMode::RawY) ? (baseName + "_Y.raw") : (baseName + "_YC.raw");
+    if (!outPathSpecified) {
+        if (outputMode == OutputMode::RawY) outPath = baseName + "_Y.raw";
+        else if (outputMode == OutputMode::RawYc) outPath = baseName + "_YC.raw";
+        else if (outputMode == OutputMode::Y4m) outPath = baseName + ".y4m";
+    }
 
-    bool writeRawToStdout = (outputMode != OutputMode::Tbc && rawOutPath == "-");
+    bool writeRawToStdout = ((outputMode == OutputMode::RawY || outputMode == OutputMode::RawYc) && outPath == "-");
+    bool writeTbcPipeToStdout = (outputMode == OutputMode::Tbc && tbcPipeMode != TbcPipeMode::None);
+    bool writeY4mToStdout = (outputMode == OutputMode::Y4m && outPath == "-");
     std::ostream& log = std::cerr;
 
 #ifdef _WIN32
-    if (writeRawToStdout && _setmode(_fileno(stdout), _O_BINARY) == -1) {
-        std::cerr << "[Error] Failed to switch stdout to binary mode for raw output.\n";
+    if ((writeRawToStdout || writeTbcPipeToStdout || writeY4mToStdout) && _setmode(_fileno(stdout), _O_BINARY) == -1) {
+        std::cerr << "[Error] Failed to switch stdout to binary mode for piped output.\n";
         return -1;
     }
 #endif
 
     log << "Target Input File: " << inFile << "\n";
     if (outputMode == OutputMode::Tbc) {
-        log << "Output Mode: TBC (dual files)\n";
-        log << "Luma Output: " << lumaFile << "\n";
-        log << "Chroma Output: " << chromaFile << "\n";
+        if (writeTbcPipeToStdout) {
+            log << "Output Mode: TBC_PIPE_" << tbcPipeModeToString(tbcPipeMode) << "\n";
+            log << "TBC Pipe Output: stdout (-)\n";
+            if (tbcPipeMode == TbcPipeMode::YcAlt) log << "Interpretation: 910x526 stream with alternating Y then C frame chunks.\n";
+            if (tbcPipeMode == TbcPipeMode::YcStack) log << "Interpretation: 910x1052 stacked stream (Y top, C bottom), out-of-spec TBC geometry.\n";
+        } else {
+            log << "Output Mode: TBC (dual files)\n";
+            log << "Luma Output: " << lumaFile << "\n";
+            log << "Chroma Output: " << chromaFile << "\n";
+        }
+    } else if (outputMode == OutputMode::Y4m) {
+        if (!y4mMetadataLoaded) {
+            std::cerr << "[Error] Y4M metadata is not initialized.\n";
+            return -1;
+        }
+        log << "Output Mode: Y4M\n";
+        log << "Y4M Output: " << (writeY4mToStdout ? "stdout (-)" : outPath) << "\n";
+        log << "Metadata Input: " << y4mMetadataPathResolved << "\n";
+        log << "Y4M Area: " << ((y4mAreaMode == Y4mAreaMode::Active) ? "active" : "full") << "\n";
+        if (y4mAreaMode == Y4mAreaMode::Active) {
+            log << "Y4M First Active Frame Line: " << y4mFirstActiveFrameLine << "\n";
+            log << "Y4M Last Active Frame Line: " << y4mLastActiveFrameLine << "\n";
+            log << "Y4M Horizontal Active Range: [" << activeVideoStart << ", " << activeVideoEnd << ")\n";
+        }
     } else {
         log << "Output Mode: " << ((outputMode == OutputMode::RawY) ? "RAW_Y" : "RAW_YC") << "\n";
-        log << "Raw Output: " << (writeRawToStdout ? "stdout (-)" : rawOutPath) << "\n";
+        log << "Raw Output: " << (writeRawToStdout ? "stdout (-)" : outPath) << "\n";
     }
 
     std::ifstream is(inFile, std::ios::binary);
@@ -647,19 +883,49 @@ int main(int argc, char** argv) {
 
     OutputState outputState;
     outputState.mode = outputMode;
+    outputState.tbcPipeMode = tbcPipeMode;
     if (outputMode == OutputMode::Tbc) {
-        outputState.osLuma.open(lumaFile, std::ios::binary);
-        outputState.osChroma.open(chromaFile, std::ios::binary);
-        if (!outputState.osLuma.is_open() || !outputState.osChroma.is_open()) {
-            std::cerr << "[Error] Failed to open one or both TBC output files for writing.\n";
+        if (writeTbcPipeToStdout) {
+            outputState.tbcPipeStream = &std::cout;
+        } else {
+            outputState.osLuma.open(lumaFile, std::ios::binary);
+            outputState.osChroma.open(chromaFile, std::ios::binary);
+            if (!outputState.osLuma.is_open() || !outputState.osChroma.is_open()) {
+                std::cerr << "[Error] Failed to open one or both TBC output files for writing.\n";
+                return -1;
+            }
+        }
+    } else if (outputMode == OutputMode::Y4m) {
+        std::ostream* y4mStream = nullptr;
+        if (writeY4mToStdout) {
+            y4mStream = &std::cout;
+        } else {
+            outputState.osY4m.open(outPath, std::ios::binary);
+            if (!outputState.osY4m.is_open()) {
+                std::cerr << "[Error] Failed to open Y4M output file for writing: " << outPath << "\n";
+                return -1;
+            }
+            y4mStream = &outputState.osY4m;
+        }
+        try {
+            Y4mNtscConfig y4mConfig;
+            y4mConfig.areaMode = y4mAreaMode;
+            y4mConfig.activeVideoStartOverride = (y4mAreaMode == Y4mAreaMode::Active) ? activeVideoStart : -1;
+            y4mConfig.activeVideoEndOverride = (y4mAreaMode == Y4mAreaMode::Active) ? activeVideoEnd : -1;
+            y4mConfig.firstActiveFrameLine = y4mFirstActiveFrameLine;
+            y4mConfig.lastActiveFrameLine = y4mLastActiveFrameLine;
+            outputState.y4mWriter = std::make_unique<Y4mNtscWriter>(y4mMetadata, y4mConfig, *y4mStream);
+        }
+        catch (const std::exception& e) {
+            std::cerr << "[Error] Failed to initialize Y4M writer: " << e.what() << "\n";
             return -1;
         }
     } else if (writeRawToStdout) {
         outputState.rawStream = &std::cout;
     } else {
-        outputState.osRaw.open(rawOutPath, std::ios::binary);
+        outputState.osRaw.open(outPath, std::ios::binary);
         if (!outputState.osRaw.is_open()) {
-            std::cerr << "[Error] Failed to open raw output file for writing: " << rawOutPath << "\n";
+            std::cerr << "[Error] Failed to open raw output file for writing: " << outPath << "\n";
             return -1;
         }
         outputState.rawStream = &outputState.osRaw;
