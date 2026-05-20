@@ -41,7 +41,7 @@ __global__ void calcMagnitudeKernel(const cufftDoubleComplex* d_out_batch, float
     int i = idx % block_size;  // Current offset within the block   (当前在 block 内的偏移量)
 
    
-    int Nx = 16, Ny = 16, Nt = 4;
+    int Nx = 16, Ny = 16; // , Nt = 4;
     int t = i / (Ny * Nx);
     int rem = i % (Ny * Nx);
     int y = rem / Nx;
