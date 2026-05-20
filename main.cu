@@ -576,7 +576,7 @@ void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int ac
 }
 
 void printUsage(const char* exeName) {
-    std::cerr << "Usage: " << exeName << " [--input <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [--out <path|->] [input.tbc]\n";
+    std::cerr << "Usage: " << exeName << " [--input <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]\n";
     std::cerr << "Defaults: --out-mode tbc, --av-start 132, --av-end 896, --lines 480\n";
 }
 
@@ -603,6 +603,7 @@ int main(int argc, char** argv) {
     std::string outPath;
     bool outPathSpecified = false;
     bool inputSpecified = false;
+    bool quietProgressLog = false;
 
     std::vector<std::string> positionalArgs;
     int argIndex = 1;
@@ -779,6 +780,9 @@ int main(int argc, char** argv) {
                 printUsage(argv[0]);
                 return -1;
             }
+        }
+        else if (arg == "-q") {
+            quietProgressLog = true;
         }
         else if (arg.rfind("--", 0) == 0) {
             std::cerr << "[Error] Unknown option: " << arg << "\n";
@@ -1099,7 +1103,7 @@ int main(int argc, char** argv) {
         frame1.resetOLA();
 
         frameCount++;
-        if (frameCount % 100 == 0) {
+        if (!quietProgressLog && frameCount % 100 == 0) {
             log << "[Info] Processed " << frameCount << " frames...\n";
         }
     }

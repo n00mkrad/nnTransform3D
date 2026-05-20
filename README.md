@@ -1,7 +1,7 @@
 ## nnTransform3D (CUDA 12 required)
 
 Usage:  
-`nnTransform3D.exe [--input <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [--out <path|->] [input.tbc]`
+`nnTransform3D.exe [--input <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
 
 Options:  
 `--input`: Input TBC file. Can also be passed without `--input`.  
@@ -16,6 +16,7 @@ Options:
 `--first-line`: First output line for active-area output (default `40`).  
 `--last-line`: Last output line for active-area output (exclusive).  
 `--lines`: Active output height in lines. Used to derive `last-line` from `first-line` when `--last-line` is omitted. Default: `480`.
+`-q`: Disable the periodic progress message (`[Info] Processed n frames...`).
 
 ### Metadata and Active Video Area
 
