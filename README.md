@@ -1,10 +1,11 @@
 ## nnTransform3D (CUDA 12 required)
 
 Usage:  
-`nnTransform3D.exe [--input <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
+`nnTransform3D.exe [--input <path>] [--model <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
 
 Options:  
 `--input`: Input TBC file. Can also be passed without `--input`.  
+`--model`: ONNX model path. Default: `chroma_net.onnx` in the executable directory or working directory.  
 `--av-start`: Active video area start (in pixels, horizontal).  
 `--av-end`: Active video area end (in pixels, horizontal).  
 `--width`: Active video width. Used to derive `av-end` from `av-start` when `--av-end` is omitted.  

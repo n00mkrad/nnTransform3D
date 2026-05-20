@@ -5,8 +5,13 @@
 #include <cmath>
 #include <algorithm>
 #include <memory>
+#include <filesystem>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <io.h>
 #include <fcntl.h>
 #endif
@@ -575,8 +580,110 @@ void finalizeAndWriteOutput(FrameBuffer& frame, OutputState& outputState, int ac
     }
 }
 
+bool tryGetExecutableDirectory(const char* argv0, std::filesystem::path& executableDir, std::string& errorMessage) {
+#ifdef _WIN32
+    std::vector<wchar_t> exePathBuffer(32768, L'\0');
+    DWORD copied = GetModuleFileNameW(nullptr, exePathBuffer.data(), static_cast<DWORD>(exePathBuffer.size()));
+    if (copied == 0) {
+        errorMessage = "[Error] Failed to resolve executable path via GetModuleFileNameW. Win32 error: " + std::to_string(GetLastError()) + ".";
+        return false;
+    }
+    if (copied >= exePathBuffer.size()) {
+        errorMessage = "[Error] Executable path is too long to resolve safely.";
+        return false;
+    }
+    executableDir = std::filesystem::path(std::wstring(exePathBuffer.data(), copied)).parent_path();
+    return true;
+#else
+    if (argv0 == nullptr || argv0[0] == '\0') {
+        errorMessage = "[Error] argv[0] is empty, cannot resolve executable directory.";
+        return false;
+    }
+    std::error_code ec;
+    std::filesystem::path executablePath = std::filesystem::absolute(std::filesystem::path(argv0), ec);
+    if (ec) {
+        errorMessage = "[Error] Failed to resolve executable directory from argv[0]: " + ec.message() + ".";
+        return false;
+    }
+    executableDir = executablePath.parent_path();
+    return true;
+#endif
+}
+
+bool resolveModelPath(const char* argv0, const std::string& modelPathArg, bool modelSpecified, std::filesystem::path& resolvedModelPath, std::string& errorMessage) {
+    std::error_code ec;
+    std::filesystem::path currentDir = std::filesystem::current_path(ec);
+    if (ec) {
+        errorMessage = "[Error] Failed to resolve current working directory: " + ec.message() + ".";
+        return false;
+    }
+    currentDir = currentDir.lexically_normal();
+
+    if (modelSpecified) {
+        std::filesystem::path explicitModelPath = std::filesystem::absolute(std::filesystem::path(modelPathArg), ec);
+        if (ec) {
+            errorMessage = "[Error] Failed to resolve --model path '" + modelPathArg + "': " + ec.message() + ".";
+            return false;
+        }
+        explicitModelPath = explicitModelPath.lexically_normal();
+
+        bool explicitExists = std::filesystem::exists(explicitModelPath, ec);
+        if (ec) {
+            errorMessage = "[Error] Failed to check --model path '" + explicitModelPath.string() + "': " + ec.message() + ".";
+            return false;
+        }
+        if (!explicitExists) {
+            errorMessage = "[Error] Model file specified by --model was not found: " + explicitModelPath.string();
+            return false;
+        }
+
+        bool explicitRegularFile = std::filesystem::is_regular_file(explicitModelPath, ec);
+        if (ec) {
+            errorMessage = "[Error] Failed to inspect --model path '" + explicitModelPath.string() + "': " + ec.message() + ".";
+            return false;
+        }
+        if (!explicitRegularFile) {
+            errorMessage = "[Error] Model path specified by --model is not a regular file: " + explicitModelPath.string();
+            return false;
+        }
+
+        resolvedModelPath = explicitModelPath;
+        return true;
+    }
+
+    std::filesystem::path executableDir;
+    if (!tryGetExecutableDirectory(argv0, executableDir, errorMessage)) return false;
+    executableDir = executableDir.lexically_normal();
+
+    std::filesystem::path exeCandidate = (executableDir / "chroma_net.onnx").lexically_normal();
+    std::filesystem::path cwdCandidate = (currentDir / "chroma_net.onnx").lexically_normal();
+
+    bool exeCandidateRegularFile = std::filesystem::is_regular_file(exeCandidate, ec);
+    if (ec) {
+        errorMessage = "[Error] Failed to inspect default model path '" + exeCandidate.string() + "': " + ec.message() + ".";
+        return false;
+    }
+    if (exeCandidateRegularFile) {
+        resolvedModelPath = exeCandidate;
+        return true;
+    }
+
+    bool cwdCandidateRegularFile = std::filesystem::is_regular_file(cwdCandidate, ec);
+    if (ec) {
+        errorMessage = "[Error] Failed to inspect default model path '" + cwdCandidate.string() + "': " + ec.message() + ".";
+        return false;
+    }
+    if (cwdCandidateRegularFile) {
+        resolvedModelPath = cwdCandidate;
+        return true;
+    }
+
+    errorMessage = "[Error] ONNX model file was not found. Searched: '" + exeCandidate.string() + "' and '" + cwdCandidate.string() + "'.";
+    return false;
+}
+
 void printUsage(const char* exeName) {
-    std::cerr << "Usage: " << exeName << " [--input <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]\n";
+    std::cerr << "Usage: " << exeName << " [--input <path>] [--model <path>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]\n";
     std::cerr << "Defaults: --out-mode tbc, --av-start 132, --av-end 896, --lines 480\n";
 }
 
@@ -603,6 +710,8 @@ int main(int argc, char** argv) {
     std::string outPath;
     bool outPathSpecified = false;
     bool inputSpecified = false;
+    std::string modelPathArg;
+    bool modelSpecified = false;
     bool quietProgressLog = false;
 
     std::vector<std::string> positionalArgs;
@@ -619,6 +728,15 @@ int main(int argc, char** argv) {
             }
             inFile = argv[++argIndex];
             inputSpecified = true;
+        }
+        else if (arg == "--model") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --model.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            modelPathArg = argv[++argIndex];
+            modelSpecified = true;
         }
         else if (arg == "--av-start") {
             if (!nextValueAvailable()) {
@@ -878,6 +996,13 @@ int main(int argc, char** argv) {
         return -1;
     }
 
+    std::filesystem::path resolvedModelPath;
+    std::string resolvedModelPathError;
+    if (!resolveModelPath(argv[0], modelPathArg, modelSpecified, resolvedModelPath, resolvedModelPathError)) {
+        std::cerr << resolvedModelPathError << "\n";
+        return -1;
+    }
+
     std::string baseName = inFile.substr(0, inFile.find_last_of('.'));
     std::string lumaFile = baseName + "_Y.tbc";
     std::string chromaFile = baseName + "_C.tbc";
@@ -1017,6 +1142,7 @@ int main(int argc, char** argv) {
 
     // Initialize ONNX (with exception handling)
     log << "Initializing ONNX Runtime...\n";
+    log << "Model Path: " << resolvedModelPath.string() << "\n";
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "nnTransform3D");
     Ort::SessionOptions session_options;
 
@@ -1053,7 +1179,7 @@ int main(int argc, char** argv) {
 
     std::unique_ptr<Ort::Session> session;
     try {
-        session = std::make_unique<Ort::Session>(env, ORT_TSTR("chroma_net.onnx"), session_options);
+        session = std::make_unique<Ort::Session>(env, resolvedModelPath.c_str(), session_options);
         log << "ONNX Session loaded successfully.\n";
     }
     catch (const std::exception& e) {
