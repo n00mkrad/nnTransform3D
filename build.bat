@@ -1,13 +1,22 @@
 @echo off
 
+echo --------------------------------------------
+
+SET "BUILD_TOOLS_BAT=%ProgramFiles(x86)%\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+if not exist "%BUILD_TOOLS_BAT%" (
+    echo Error: MS Build Tools not found at "%BUILD_TOOLS_BAT%"
+    echo Please install Visual Studio 2022 Build Tools or update the path in this script.
+    goto end
+)
+
 if not defined VSCMD_VER (
     echo Initializing MS Build Tools...
-    call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+    call "%BUILD_TOOLS_BAT%" x64
 ) else (
     echo MS Build Tools environment already initialized.
 )
 
-echo Compiling: %~dp0build
+echo Preparing build directory: %~dp0build...
 cmake -S "%~dp0." -B "%~dp0build"
 
 if %errorlevel% neq 0 (
@@ -15,7 +24,8 @@ if %errorlevel% neq 0 (
     goto end
 )
 
-cmake --build "%~dp0build" --config Release -j 8
+echo Building with %NUMBER_OF_PROCESSORS% parallel jobs...
+cmake --build "%~dp0build" --config Release -j %NUMBER_OF_PROCESSORS%
 
 if %errorlevel% neq 0 (
     echo Finished with ERRORLEVEL %errorlevel%
@@ -27,3 +37,4 @@ if %errorlevel% neq 0 (
 )
 
 :end
+echo --------------------------------------------
