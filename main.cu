@@ -718,6 +718,13 @@ int main(int argc, char** argv) {
     int trtMinSubgraphSize = 1;
     int startFrame = 0;
     bool quietProgressLog = false;
+    std::filesystem::path executableDir;
+    std::string executableDirError;
+    if (!tryGetExecutableDirectory(argv[0], executableDir, executableDirError)) {
+        std::cerr << executableDirError << "\n";
+        return -1;
+    }
+    executableDir = executableDir.lexically_normal();
 
     std::vector<std::string> positionalArgs;
     int argIndex = 1;
@@ -1265,6 +1272,15 @@ int main(int argc, char** argv) {
     log << "GPU Device: " << gpuId << "\n";
     log << "TensorRT trt_max_partition_iterations: " << trtMaxPartitionIterations << "\n";
     log << "TensorRT trt_min_subgraph_size: " << trtMinSubgraphSize << "\n";
+    std::filesystem::path trtCachePath = (executableDir / "trt_cache").lexically_normal();
+    std::error_code trtCachePathEc;
+    std::filesystem::create_directories(trtCachePath, trtCachePathEc);
+    if (trtCachePathEc) {
+        std::cerr << "[Error] Failed to create TensorRT cache directory '" << trtCachePath.string() << "': " << trtCachePathEc.message() << ".\n";
+        return -1;
+    }
+    std::string trtCachePathString = trtCachePath.string();
+    log << "TensorRT Engine Cache: " << trtCachePathString << "\n";
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "nnTransform3D");
     Ort::SessionOptions session_options;
 
@@ -1283,7 +1299,7 @@ int main(int argc, char** argv) {
         // It takes a few minutes for TensorRT to compile ONNX into an Engine for the first time.
         // With cache enabled, only the first run will be slow; subsequent startups will only take a few seconds.
         trt_options.trt_engine_cache_enable = 1;
-        trt_options.trt_engine_cache_path = "./trt_cache"; // Ensure the current directory has write permissions
+        trt_options.trt_engine_cache_path = trtCachePathString.c_str();
 
         // Append TensorRT Provider
         session_options.AppendExecutionProvider_TensorRT(trt_options);

@@ -12,7 +12,7 @@ Options:
 `--width`: Active video width. Used to derive `av-end` from `av-start` when `--av-end` is omitted.  
 `--start-frame`: Source frame index to start decoding from (0-based, default `0`). When `> 0`, the decoder internally pre-rolls one frame for temporal context and drops that pre-roll output.  
 `--out-mode`: Output mode, either `tbc`, `raw_y`, `raw_yc`, or `y4m`. Default: `tbc`.  
-`--tbc-pipe-mode`: TBC stdout layout for `--out-mode tbc`: `y`, `c`, `yc_alt`, or `yc_stack`. Requires `--out -`.  
+`--tbc-pipe-mode`: TBC stdout layout for `--out-mode tbc`: `y`, `c`, `yc_alt`, or `yc_stack` (Luma, Chroma, Luma/Chroma alternating at 2x frame rate, Luma/Chroma stacked top-bottom). Requires `--out -`.  
 `--out`: Output path, or `-` for binary stdout. In TBC mode, `--out -` is only valid when `--tbc-pipe-mode` is set.  
 `--json`: Metadata JSON path. If omitted, `<input>.json` is used if present.  
 `--full-frame`: For `raw_y`, `raw_yc`, and `y4m`, output full frame geometry including blanking regions.  
