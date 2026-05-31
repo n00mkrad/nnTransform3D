@@ -1,16 +1,17 @@
 ## nnTransform3D (CUDA 12 required)
 
 Basic Usage:  
-`nnTransform3D.exe [--start-frame <num>] [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--json <path>] [--full-frame] [--first-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
+`nnTransform3D.exe [--start-frame <num>] [--end-frame <num>] [--av-start <num>] [--av-end <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--json <path>] [--full-frame] [--first-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
 
 Full Usage:  
-`nnTransform3D.exe [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--start-frame <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
+`nnTransform3D.exe [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--start-frame <num>] [--end-frame <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]`
 
 Options:  
 `--av-start`: Active video area start (in pixels, horizontal).  
 `--av-end`: Active video area end (in pixels, horizontal).  
 `--width`: Active video width. Used to derive `av-end` from `av-start` when `--av-end` is omitted.  
 `--start-frame`: Source frame index to start decoding from (0-based, default `0`). When `> 0`, the decoder internally pre-rolls one frame for temporal context and drops that pre-roll output.  
+`--end-frame`: Inclusive source frame index to stop output at (0-based, default `0` for unlimited). When active, one extra frame may still be decoded for temporal lookahead.
 `--out-mode`: Output mode, either `tbc`, `raw_y`, `raw_yc`, or `y4m`. Default: `tbc`.  
 `--tbc-pipe-mode`: TBC stdout layout for `--out-mode tbc`: `y`, `c`, `yc_alt`, or `yc_stack` (Luma, Chroma, Luma/Chroma alternating at 2x frame rate, Luma/Chroma stacked top-bottom). Requires `--out -`.  
 `--out`: Output path, or `-` for binary stdout. In TBC mode, `--out -` is only valid when `--tbc-pipe-mode` is set.  
@@ -112,7 +113,7 @@ nnTransform3D --input input.tbc --out-mode tbc --tbc-pipe-mode yc_stack --out - 
 - `--full-frame` keeps raw geometry at `910x526` (`raw_y`) or `910x1052` stacked (`raw_yc`).
 - Raw default names are `input_Y.raw` (`raw_y`) and `input_YC.raw` (`raw_yc`) unless `--out` is provided.
 - `--out -` can be used in raw mode to pipe the data directly into another process (e.g. ffmpeg) without writing to disk.
-- `--start-frame` is applied before all raw output modes using 0-based source-frame indexing.
+- `--start-frame` and `--end-frame` are applied before all raw output modes using 0-based source-frame indexing.
 
 FFmpeg and mpv decode examples (replace `30000/1001` with your actual frame rate if needed):
 

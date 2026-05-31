@@ -684,8 +684,8 @@ bool resolveModelPath(const char* argv0, const std::string& modelPathArg, bool m
 }
 
 void printUsage(const char* exeName) {
-    std::cerr << "Usage: " << exeName << " [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--start-frame <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]\n";
-    std::cerr << "Defaults: --out-mode tbc, --gpu 0, --trt_mpi 1000, --trt_mss 1, --start-frame 0, --av-start 132, --av-end 896, --lines 480\n";
+    std::cerr << "Usage: " << exeName << " [--input <path>] [--model <path>] [--gpu <num>] [--trt_mpi <num>] [--trt_mss <num>] [--start-frame <num>] [--end-frame <num>] [--av-start <num>] [--av-end <num>] [--width <num>] [--out-mode tbc|raw_y|raw_yc|y4m] [--tbc-pipe-mode <y|c|yc_alt|yc_stack>] [--json <path>] [--full-frame] [--first-line <num>] [--last-line <num>] [--lines <num>] [-q] [--out <path|->] [input.tbc]\n";
+    std::cerr << "Defaults: --out-mode tbc, --gpu 0, --trt_mpi 1000, --trt_mss 1, --start-frame 0, --end-frame 0, --av-start 132, --av-end 896, --lines 480\n";
 }
 
 // --- Main program ---
@@ -717,6 +717,8 @@ int main(int argc, char** argv) {
     int trtMaxPartitionIterations = 1000;
     int trtMinSubgraphSize = 1;
     int startFrame = 0;
+    int endFrame = 0;
+    bool endFrameSpecified = false;
     bool quietProgressLog = false;
     std::filesystem::path executableDir;
     std::string executableDirError;
@@ -826,6 +828,27 @@ int main(int argc, char** argv) {
             }
             catch (const std::exception& e) {
                 std::cerr << "[Error] Invalid --start-frame value: " << e.what() << "\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+        }
+        else if (arg == "--end-frame") {
+            if (!nextValueAvailable()) {
+                std::cerr << "[Error] Missing value after --end-frame.\n";
+                printUsage(argv[0]);
+                return -1;
+            }
+            try {
+                endFrame = std::stoi(argv[++argIndex]);
+                endFrameSpecified = true;
+                if (endFrame < 0) {
+                    std::cerr << "[Error] --end-frame must be a non-negative integer.\n";
+                    printUsage(argv[0]);
+                    return -1;
+                }
+            }
+            catch (const std::exception& e) {
+                std::cerr << "[Error] Invalid --end-frame value: " << e.what() << "\n";
                 printUsage(argv[0]);
                 return -1;
             }
@@ -1192,6 +1215,15 @@ int main(int argc, char** argv) {
         std::cerr << "[Error] --start-frame " << startFrame << " is out of range. Available frame indices: 0.." << (totalFramesAvailable - 1) << ".\n";
         return -1;
     }
+    const bool limitEndFrame = endFrameSpecified && endFrame > 0;
+    if (limitEndFrame && endFrame >= totalFramesAvailable) {
+        std::cerr << "[Error] --end-frame " << endFrame << " is out of range. Available frame indices: 0.." << (totalFramesAvailable - 1) << ".\n";
+        return -1;
+    }
+    if (limitEndFrame && endFrame < startFrame) {
+        std::cerr << "[Error] --end-frame must be greater than or equal to --start-frame when both are active.\n";
+        return -1;
+    }
 
     const long long decodeStartFrame = (startFrame > 0) ? static_cast<long long>(startFrame - 1) : 0LL;
     if (decodeStartFrame > (std::numeric_limits<long long>::max() / frameBytes)) {
@@ -1209,6 +1241,7 @@ int main(int argc, char** argv) {
     const bool suppressPreRollOutput = (startFrame > 0);
     log << "Input Frames Available: " << totalFramesAvailable << "\n";
     log << "Start Frame (0-based): " << startFrame << "\n";
+    log << "End Frame: " << (limitEndFrame ? std::to_string(endFrame) : "unlimited") << "\n";
     log << "Decode Start Frame: " << decodeStartFrame << (suppressPreRollOutput ? " (pre-roll enabled)\n" : "\n");
     log << "Decode Start Byte Offset: " << decodeStartByteOffset << "\n";
 
@@ -1350,7 +1383,10 @@ int main(int argc, char** argv) {
     bool dropNextOutputFrame = suppressPreRollOutput;
     int decodedFrameCount = 1;
     int emittedFrameCount = 0;
+    long long currentOutputFrameIndex = decodeStartFrame;
+    bool endFrameReachedWithLookahead = false;
     while (readInterlacedFrame(is, frame1)) {
+        decodedFrameCount++;
         try {
             // Immediately send to GPU upon reading each frame
             cudaMemcpy(frame1.d_cvbs, frame1.cvbs.data(), FRAME_WIDTH * FRAME_HEIGHT * sizeof(uint16_t), cudaMemcpyHostToDevice);
@@ -1359,12 +1395,16 @@ int main(int argc, char** argv) {
             cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
             cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
             if (dropNextOutputFrame) {
-                log << "Skipping pre-roll output frame at source index " << decodeStartFrame << ".\n";
+                log << "Skipping pre-roll output frame at source index " << currentOutputFrameIndex << ".\n";
                 dropNextOutputFrame = false;
             } else {
                 // Write back to disk or raw stream
                 finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
                 emittedFrameCount++;
+            }
+            if (limitEndFrame && currentOutputFrameIndex >= endFrame) {
+                endFrameReachedWithLookahead = true;
+                break;
             }
         }
         catch (const std::exception& e) {
@@ -1376,29 +1416,31 @@ int main(int argc, char** argv) {
         std::swap(frame0, frame1);
         frame1.resetOLA();
 
-        decodedFrameCount++;
+        currentOutputFrameIndex++;
         if (!quietProgressLog && emittedFrameCount > 0 && emittedFrameCount % 100 == 0) {
             log << "[Info] Processed " << emittedFrameCount << " frames...\n";
         }
     }
 
     // --- 3. Finalization phase (LookAhead) ---
-    log << "Entering Phase 3: LookAhead (Finalizing last frame)...\n";
-    frame1.isPadding = true;
-    processSplit3D(frame0, frame1, *session, activeVideoStart, activeVideoEnd);
-
-    // Bring the final frame results back to CPU
-    cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
-    cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
-    if (dropNextOutputFrame) {
-        log << "Skipping pre-roll output frame at source index " << decodeStartFrame << ".\n";
+    if (endFrameReachedWithLookahead) {
+        log << "End frame reached with real lookahead; skipping final padding phase.\n";
     } else {
-        finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
-        emittedFrameCount++;
+        log << "Entering Phase 3: LookAhead (Finalizing last frame)...\n";
+        frame1.isPadding = true;
+        processSplit3D(frame0, frame1, *session, activeVideoStart, activeVideoEnd);
+
+        // Bring the final frame results back to CPU
+        cudaMemcpy(frame0.accChroma.data(), frame0.d_accChroma, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
+        cudaMemcpy(frame0.weightSum.data(), frame0.d_weightSum, FRAME_WIDTH * FRAME_HEIGHT * sizeof(double), cudaMemcpyDeviceToHost);
+        if (dropNextOutputFrame) {
+            log << "Skipping pre-roll output frame at source index " << currentOutputFrameIndex << ".\n";
+        } else if (!limitEndFrame || currentOutputFrameIndex <= endFrame) {
+            finalizeAndWriteOutput(frame0, outputState, activeVideoStart, activeVideoEnd);
+            emittedFrameCount++;
+        }
     }
 
     log << "All Done! Total decode frames: " << decodedFrameCount << ", emitted frames: " << emittedFrameCount << "\n";
     return 0;
 }
-
-
